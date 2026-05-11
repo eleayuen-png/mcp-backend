@@ -13,12 +13,12 @@ const app = express();
 app.use(cors());
 
 // ==========================================
-// 🚀 1. INITIALIZATION (Stripe, Firebase, Gemini)
+// 🚀 1. INITIALIZATION
 // ==========================================
 const stripeKey = process.env.STRIPE_SECRET_KEY;
 const stripe = new Stripe(stripeKey || 'sk_test_dummy', { apiVersion: '2026-04-22.dahlia' });
 
-let db: FirebaseFirestore.Firestore | null = null;
+let db: any = null;
 try {
     if (process.env.FIREBASE_SERVICE_ACCOUNT) {
         const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
@@ -26,13 +26,17 @@ try {
         db = getFirestore();
         console.log("🔥 Firebase Admin Initialized.");
     }
-} catch (e) { console.error("❌ Firebase Admin failed:", e); }
+} catch (e) { 
+    console.error("❌ Firebase Admin failed to initialize. Check your FIREBASE_SERVICE_ACCOUNT env var."); 
+}
 
-// Gemini Configuration for "Magic Suggest"
-// Note: apiKey is managed by the environment at runtime
-const GEMINI_API_KEY = ""; 
+/**
+ * GEMINI CONFIGURATION
+ * Note: apiKey is managed by the environment at runtime here. 
+ * On Render, you MUST set the GEMINI_API_KEY environment variable.
+ */
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || ""; 
 const GEMINI_MODEL = "gemini-2.5-flash-preview-09-2025";
-const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
 
 // ==========================================
 // 💳 2. STRIPE WEBHOOK
@@ -45,15 +49,19 @@ app.post('/api/webhook/stripe', express.raw({ type: 'application/json' }), async
     try {
         const event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret);
         if (event.type === 'checkout.session.completed') {
-            const session = event.data.object as Stripe.Checkout.Session;
+            const session = event.data.object as any;
             const userId = session.client_reference_id; 
             if (userId && db) {
+                // Correctly pathing to the project document for the specific user
                 const userDocRef = db.collection('artifacts').doc('mcp-studio-v1').collection('users').doc(userId).collection('project').doc('current');
                 await userDocRef.set({ isPro: true }, { merge: true });
                 console.log(`✅ Upgraded user ${userId} to Pro!`);
             }
         }
-    } catch (err: any) { return res.status(400).send(`Webhook Error: ${err.message}`); }
+    } catch (err: any) { 
+        console.error("❌ Webhook error:", err.message);
+        return res.status(400).send(`Webhook Error: ${err.message}`); 
+    }
     res.send();
 });
 
@@ -70,20 +78,21 @@ app.post('/api/analyze-schema', async (req, res) => {
     }
 
     try {
-        // Prepare the prompt for Gemini
-        // We send a condensed version of the endpoints to save on prompt tokens
-        const schemaSummary = endpoints.map(e => `ID: ${e.id} | Desc: ${e.description}`).join('\n');
+        console.log(`🧠 Analyzing ${endpoints.length} endpoints...`);
+        
+        const schemaSummary = endpoints.map(e => `- ID: ${e.id}\n  Desc: ${e.description}`).join('\n');
 
-        const systemPrompt = `You are an expert AI Agent Architect. Analyze the following list of API endpoints and suggest the top 5-10 most 'agentic' ones. 
-        Agentic tools are those that allow an AI to search, create, update, or retrieve high-value data. 
-        Return ONLY a JSON array of endpoint IDs.`;
+        const systemPrompt = `You are an expert AI Agent Architect. Analyze the list of API endpoints provided and suggest the top 5-10 most 'agentic' ones. 
+        Focus on endpoints that allow searching, creating, updating, or retrieving high-value data. 
+        Ignore low-value administrative or meta endpoints.
+        Return ONLY a JSON object with a "suggestions" key containing an array of strings (the endpoint IDs).`;
 
-        const userPrompt = `Analyze these endpoints and provide suggestions:\n${schemaSummary}`;
+        const userPrompt = `Suggest the best tools from this list:\n${schemaSummary}`;
 
-        // Implement exponential backoff for API call
         const callGemini = async (retryCount = 0): Promise<any> => {
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
             try {
-                const result = await axios.post(GEMINI_URL, {
+                const result = await axios.post(url, {
                     contents: [{ parts: [{ text: userPrompt }] }],
                     systemInstruction: { parts: [{ text: systemPrompt }] },
                     generationConfig: { 
@@ -92,13 +101,17 @@ app.post('/api/analyze-schema', async (req, res) => {
                             type: "OBJECT",
                             properties: {
                                 suggestions: { type: "ARRAY", items: { type: "STRING" } }
-                            }
+                            },
+                            required: ["suggestions"]
                         }
                     }
                 });
-                return JSON.parse(result.data.candidates[0].content.parts[0].text);
+                
+                const text = result.data.candidates?.[0]?.content?.parts?.[0]?.text;
+                if (!text) throw new Error("Empty response from Gemini");
+                return JSON.parse(text);
             } catch (error: any) {
-                if (retryCount < 5) {
+                if (retryCount < 5 && error.response?.status >= 500) {
                     const delay = Math.pow(2, retryCount) * 1000;
                     await new Promise(resolve => setTimeout(resolve, delay));
                     return callGemini(retryCount + 1);
@@ -108,24 +121,30 @@ app.post('/api/analyze-schema', async (req, res) => {
         };
 
         const analysis = await callGemini();
+        console.log(`✨ AI Suggested: ${analysis.suggestions.length} tools.`);
         res.json({ suggestions: analysis.suggestions });
 
     } catch (error: any) {
-        console.error("❌ Gemini Analysis Error:", error);
-        res.status(500).json({ error: "Failed to analyze schema with AI." });
+        console.error("❌ Magic Suggest Failed:", error.response?.data || error.message);
+        res.status(500).json({ 
+            error: "Failed to analyze schema with AI.",
+            details: error.response?.data?.error?.message || error.message
+        });
     }
 });
 
 // ==========================================
-// 🛡️ PII MASKING & 📂 VAULT (Existing Logic)
+// 🛡️ PII MASKING & 📂 VAULT
 // ==========================================
 const maskSensitiveData = (data: any): any => {
     if (!data) return data;
-    let jsonString = JSON.stringify(data);
-    const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
-    const phoneRegex = /(\+\d{1,2}\s?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}/g;
-    jsonString = jsonString.replace(emailRegex, "[REDACTED_EMAIL]").replace(phoneRegex, "[REDACTED_PHONE]");
-    return JSON.parse(jsonString);
+    try {
+        let jsonString = JSON.stringify(data);
+        const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+        const phoneRegex = /(\+\d{1,2}\s?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}/g;
+        jsonString = jsonString.replace(emailRegex, "[REDACTED_EMAIL]").replace(phoneRegex, "[REDACTED_PHONE]");
+        return JSON.parse(jsonString);
+    } catch (e) { return data; }
 };
 
 const deploymentVault = new Map<string, any>();
@@ -152,8 +171,9 @@ app.get('/sse/:serverId', async (req, res) => {
     mcpServer.setRequestHandler(ListToolsRequestSchema, async () => {
         const tools: any[] = [];
         vaultData.endpoints.forEach((ep: any) => {
+            const toolName = `${ep.method}_${ep.path.replace(/[^a-zA-Z0-9]/g, '_')}`.toLowerCase();
             tools.push({
-                name: `${ep.method}_${ep.path.replace(/[^a-zA-Z0-9]/g, '_')}`.toLowerCase(),
+                name: toolName,
                 description: ep.description || `Execute ${ep.method} on ${ep.path}`,
                 inputSchema: { type: "object", properties: { params: { type: "object" }, body: { type: "object" } } }
             });
