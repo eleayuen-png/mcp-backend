@@ -27,14 +27,9 @@ try {
         console.log("🔥 Firebase Admin Initialized.");
     }
 } catch (e) { 
-    console.error("❌ Firebase Admin failed to initialize. Check your FIREBASE_SERVICE_ACCOUNT env var."); 
+    console.error("❌ Firebase Admin failed to initialize."); 
 }
 
-/**
- * GEMINI CONFIGURATION
- * Note: apiKey is managed by the environment at runtime here. 
- * On Render, you MUST set the GEMINI_API_KEY environment variable.
- */
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || ""; 
 const GEMINI_MODEL = "gemini-2.5-flash-preview-09-2025";
 
@@ -52,7 +47,6 @@ app.post('/api/webhook/stripe', express.raw({ type: 'application/json' }), async
             const session = event.data.object as any;
             const userId = session.client_reference_id; 
             if (userId && db) {
-                // Correctly pathing to the project document for the specific user
                 const userDocRef = db.collection('artifacts').doc('mcp-studio-v1').collection('users').doc(userId).collection('project').doc('current');
                 await userDocRef.set({ isPro: true }, { merge: true });
                 console.log(`✅ Upgraded user ${userId} to Pro!`);
@@ -73,8 +67,17 @@ app.use(express.json());
 app.post('/api/analyze-schema', async (req, res) => {
     const { endpoints } = req.body;
 
+    // 🚩 CHECK 1: Missing API Key
+    if (!GEMINI_API_KEY) {
+        console.error("❌ ERROR: GEMINI_API_KEY is not set in Render environment variables.");
+        return res.status(500).json({ 
+            error: "Internal Configuration Error", 
+            details: "GEMINI_API_KEY is missing on the server. Please add it to Render environment variables." 
+        });
+    }
+
     if (!endpoints || !Array.isArray(endpoints)) {
-        return res.status(400).json({ error: "No endpoints provided for analysis." });
+        return res.status(400).json({ error: "No endpoints provided." });
     }
 
     try {
@@ -84,7 +87,6 @@ app.post('/api/analyze-schema', async (req, res) => {
 
         const systemPrompt = `You are an expert AI Agent Architect. Analyze the list of API endpoints provided and suggest the top 5-10 most 'agentic' ones. 
         Focus on endpoints that allow searching, creating, updating, or retrieving high-value data. 
-        Ignore low-value administrative or meta endpoints.
         Return ONLY a JSON object with a "suggestions" key containing an array of strings (the endpoint IDs).`;
 
         const userPrompt = `Suggest the best tools from this list:\n${schemaSummary}`;
@@ -96,39 +98,42 @@ app.post('/api/analyze-schema', async (req, res) => {
                     contents: [{ parts: [{ text: userPrompt }] }],
                     systemInstruction: { parts: [{ text: systemPrompt }] },
                     generationConfig: { 
-                        responseMimeType: "application/json",
-                        responseSchema: {
-                            type: "OBJECT",
-                            properties: {
-                                suggestions: { type: "ARRAY", items: { type: "STRING" } }
-                            },
-                            required: ["suggestions"]
-                        }
+                        responseMimeType: "application/json"
                     }
                 });
                 
-                const text = result.data.candidates?.[0]?.content?.parts?.[0]?.text;
-                if (!text) throw new Error("Empty response from Gemini");
-                return JSON.parse(text);
+                const responseText = result.data.candidates?.[0]?.content?.parts?.[0]?.text;
+                if (!responseText) throw new Error("Empty response from AI");
+                
+                // Parse and handle both stringified JSON and direct objects
+                const parsed = JSON.parse(responseText);
+                return parsed.suggestions || [];
             } catch (error: any) {
-                if (retryCount < 5 && error.response?.status >= 500) {
-                    const delay = Math.pow(2, retryCount) * 1000;
-                    await new Promise(resolve => setTimeout(resolve, delay));
+                if (retryCount < 3 && error.response?.status >= 500) {
+                    await new Promise(r => setTimeout(r, 1000 * Math.pow(2, retryCount)));
                     return callGemini(retryCount + 1);
                 }
                 throw error;
             }
         };
 
-        const analysis = await callGemini();
-        console.log(`✨ AI Suggested: ${analysis.suggestions.length} tools.`);
-        res.json({ suggestions: analysis.suggestions });
+        const suggestions = await callGemini();
+        console.log(`✨ AI Suggested: ${suggestions.length} tools.`);
+        res.json({ suggestions });
 
     } catch (error: any) {
         console.error("❌ Magic Suggest Failed:", error.response?.data || error.message);
-        res.status(500).json({ 
-            error: "Failed to analyze schema with AI.",
-            details: error.response?.data?.error?.message || error.message
+        
+        // 🚩 FALLBACK: If AI fails, suggest common endpoints automatically so the user isn't stuck
+        const fallbackSuggestions = endpoints
+            .filter(e => e.id.toLowerCase().includes('get') || e.id.toLowerCase().includes('search'))
+            .slice(0, 5)
+            .map(e => e.id);
+
+        res.status(200).json({ 
+            suggestions: fallbackSuggestions,
+            warning: "AI Analysis failed, using heuristic fallback.",
+            details: error.message 
         });
     }
 });
