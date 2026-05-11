@@ -7,7 +7,13 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 import axios from 'axios';
 
 const app = express();
-app.use(cors());
+app.use(cors({
+  origin: [
+    'http://localhost:5173', // For local testing
+    'https://eleayuen-png.github.io' // Your new GitHub Pages URL
+  ],
+  credentials: true
+}));
 app.use(express.json());
 
 // ==========================================
@@ -46,7 +52,7 @@ app.post('/api/deploy', (req, res) => {
     res.json({
         success: true,
         serverId: serverId,
-        sseUrl: `http://localhost:3000/sse/${serverId}`,
+        sseUrl: `https://mcp-proxy-backend.onrender.com/sse/${serverId}`,
     });
 });
 
