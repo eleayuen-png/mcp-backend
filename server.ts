@@ -8,86 +8,120 @@ import axios from 'axios';
 
 const app = express();
 app.use(cors());
+app.use(express.json());
 
 // ==========================================
-// THE VAULT (Database)
+// 🛡️ PII MASKING UTILITY
+// ==========================================
+/**
+ * Scans API responses for sensitive patterns and redacts them.
+ */
+const maskSensitiveData = (data: any): any => {
+    if (!data) return data;
+    
+    // Convert object to string to perform global regex replacement
+    let jsonString = JSON.stringify(data);
+    
+    // Regex for Email
+    const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+    
+    // Regex for basic international phone format
+    const phoneRegex = /(\+\d{1,2}\s?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}/g;
+
+    jsonString = jsonString
+        .replace(emailRegex, "[REDACTED_EMAIL]")
+        .replace(phoneRegex, "[REDACTED_PHONE]");
+
+    return JSON.parse(jsonString);
+};
+
+// ==========================================
+// 📂 THE VAULT (In-Memory Database)
 // ==========================================
 const deploymentVault = new Map<string, {
     apiKey: string;
     endpoints: any[];
     baseUrl: string;
-    macros: any[]; 
+    macros: any[];
+    piiMasking: boolean;
 }>();
 
 const activeTransports = new Map<string, SSEServerTransport>();
 
 // ==========================================
-// ENDPOINT 1: The React Frontend calls this to Deploy
+// ENDPOINT 1: Deploy (Called by React Frontend)
 // ==========================================
-app.post('/api/deploy', express.json(), (req, res) => {
-    const { apiKey, endpoints, baseUrl, macros } = req.body;
-
+app.post('/api/deploy', (req, res) => {
+    const { apiKey, endpoints, baseUrl, macros, piiMasking } = req.body;
     const serverId = uuidv4();
 
     deploymentVault.set(serverId, {
         apiKey: apiKey,
         endpoints: endpoints || [],
         baseUrl: baseUrl,
-        macros: macros || []
+        macros: macros || [],
+        piiMasking: !!piiMasking
     });
 
-    console.log(`[VAULT] New server deployed with ID: ${serverId} including ${macros?.length || 0} macros`);
+    console.log(`[VAULT] Deployed ${serverId}. PII Masking: ${!!piiMasking}`);
+
+    // NOTE: In production on Render, update this URL to your actual Render URL
+    const publicUrl = process.env.RENDER_EXTERNAL_URL || `http://localhost:${process.env.PORT || 3000}`;
 
     res.json({
         success: true,
         serverId: serverId,
-        sseUrl: `https://mcp-proxy-backend.onrender.com/sse/${serverId}`, 
+        sseUrl: `${publicUrl}/sse/${serverId}`, 
     });
 });
 
 // ==========================================
-// ENDPOINT 2: Claude/Cursor connects here (The SSE Connection)
+// ENDPOINT 2: SSE Connection (Claude/Cursor connects here)
 // ==========================================
 app.get('/sse/:serverId', async (req, res) => {
     const serverId = req.params.serverId;
-
     const vaultData = deploymentVault.get(serverId);
+    
     if (!vaultData) {
-        res.status(404).send("Server configuration not found.");
-        return;
+        return res.status(404).send("Configuration not found. Please re-deploy from MCP Studio.");
     }
 
     const transport = new SSEServerTransport("/messages/" + serverId, res);
     activeTransports.set(serverId, transport);
 
     const mcpServer = new Server({
-        name: "MCP-Studio-Proxy",
-        version: "1.0.0"
-    }, {
-        capabilities: { tools: {} }
+        name: "MCP-Studio-Managed-Proxy",
+        version: "1.1.0"
+    }, { 
+        capabilities: { tools: {} } 
     });
 
+    // 1. List Available Tools
     mcpServer.setRequestHandler(ListToolsRequestSchema, async () => {
         const tools: any[] = [];
-
-        // 1. Add individual pruned endpoints
+        
+        // Add Pruned Endpoints as individual tools
         vaultData.endpoints.forEach(ep => {
-            const toolName = `${ep.method}_${ep.path.replace(/[^a-zA-Z0-9]/g, '_')}`;
+            const safeName = `${ep.method}_${ep.path.replace(/[^a-zA-Z0-9]/g, '_')}`.toLowerCase();
             tools.push({
-                name: toolName,
+                name: safeName,
                 description: ep.description || `Execute ${ep.method} on ${ep.path}`,
                 inputSchema: { 
-                  type: "object", 
-                  properties: {} 
+                    type: "object", 
+                    properties: {
+                        // For a dynamic proxy, you'd expand this to include path params/query/body
+                        params: { type: "object", description: "Query or Path parameters" },
+                        body: { type: "object", description: "Request JSON body" }
+                    } 
                 }
             });
         });
 
-        // 2. Add Macros
-        vaultData.macros.forEach(macro => {
+        // Add Macro Tools
+        vaultData.macros.forEach(m => {
             tools.push({
-                name: macro.name,
-                description: macro.description,
+                name: m.name.replace(/\s+/g, '_').toLowerCase(),
+                description: m.description,
                 inputSchema: { type: "object", properties: {} }
             });
         });
@@ -95,70 +129,88 @@ app.get('/sse/:serverId', async (req, res) => {
         return { tools };
     });
 
+    // 2. Handle Tool Execution
     mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
-        const toolName = request.params.name;
-        const vaultData = deploymentVault.get(serverId);
-        if (!vaultData) throw new Error("Vault data missing");
-
-        // Check for Macro execution
-        const macro = vaultData.macros.find(m => m.name === toolName);
+        const toolName = request.params.name.toLowerCase();
+        const args = request.params.arguments as any;
         
+        // --- Logic A: Check if it's a Macro ---
+        const macro = vaultData.macros.find(m => m.name.toLowerCase() === toolName);
         if (macro) {
-            console.log(`[MACRO] Executing: ${macro.name}`);
-            let results = [];
+            console.log(`[EXEC] Running Macro: ${toolName}`);
+            let sequenceResults = [];
             
             for (const step of macro.steps) {
-                try {
-                    const response = await axios({
-                        method: step.method,
-                        url: `${vaultData.baseUrl}${step.path}`,
-                        headers: {
-                            'Authorization': `Bearer ${vaultData.apiKey}`,
-                            'Content-Type': 'application/json'
-                        }
-                    });
-                    results.push({ step: step.path, status: 'Success', data: response.data });
-                } catch (err: any) {
-                    results.push({ step: step.path, status: 'Failed', error: err.message });
-                    break; 
-                }
+                const response = await axios({
+                    method: step.method,
+                    url: `${vaultData.baseUrl}${step.path}`,
+                    headers: { 'Authorization': `Bearer ${vaultData.apiKey}` }
+                });
+                
+                let stepData = response.data;
+                if (vaultData.piiMasking) stepData = maskSensitiveData(stepData);
+                
+                sequenceResults.push({ step: step.path, data: stepData });
             }
-            return { content: [{ type: "text", text: JSON.stringify(results, null, 2) }] };
+            return { content: [{ type: "text", text: JSON.stringify(sequenceResults, null, 2) }] };
         }
 
-        // Check for individual Tool execution
-        const endpoint = vaultData.endpoints.find(ep => 
-            `${ep.method}_${ep.path.replace(/[^a-zA-Z0-9]/g, '_')}` === toolName
-        );
+        // --- Logic B: Check if it's an Individual Tool ---
+        const endpoint = vaultData.endpoints.find(e => {
+            const safeName = `${e.method}_${e.path.replace(/[^a-zA-Z0-9]/g, '_')}`.toLowerCase();
+            return safeName === toolName;
+        });
 
         if (endpoint) {
-          try {
-              const response = await axios({
-                  method: endpoint.method,
-                  url: `${vaultData.baseUrl}${endpoint.path}`,
-                  headers: {
-                      'Authorization': `Bearer ${vaultData.apiKey}`,
-                      'Content-Type': 'application/json'
-                  }
-              });
-              return { content: [{ type: "text", text: JSON.stringify(response.data, null, 2) }] };
-          } catch (err: any) {
-              return { content: [{ type: "text", text: `Error: ${err.message}` }], isError: true };
-          }
+            console.log(`[EXEC] Running Tool: ${toolName}`);
+            try {
+                const response = await axios({
+                    method: endpoint.method,
+                    url: `${vaultData.baseUrl}${endpoint.path}`,
+                    params: args?.params,
+                    data: args?.body,
+                    headers: { 
+                        'Authorization': `Bearer ${vaultData.apiKey}`,
+                        'Content-Type': 'application/json'
+                    }
+                });
+
+                let finalData = response.data;
+                
+                // Apply Privacy Redaction if enabled
+                if (vaultData.piiMasking) {
+                    finalData = maskSensitiveData(finalData);
+                }
+
+                return { content: [{ type: "text", text: JSON.stringify(finalData, null, 2) }] };
+            } catch (err: any) {
+                return {
+                    content: [{ type: "text", text: `API Error: ${err.response?.data ? JSON.stringify(err.response.data) : err.message}` }],
+                    isError: true
+                };
+            }
         }
         
-        throw new Error("Tool not found");
+        throw new Error(`Tool ${toolName} not recognized.`);
     });
 
     await mcpServer.connect(transport);
 });
 
+// ==========================================
+// ENDPOINT 3: Message Routing (Claude -> Server)
+// ==========================================
 app.post('/messages/:serverId', async (req, res) => {
-    const serverId = req.params.serverId;
-    const transport = activeTransports.get(serverId);
-    if (!transport) return res.status(404).send("Transport not found");
-    await transport.handlePostMessage(req, res);
+    const transport = activeTransports.get(req.params.serverId);
+    if (transport) {
+        await transport.handlePostMessage(req, res);
+    } else {
+        res.status(404).send("Transport session expired.");
+    }
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 Backend live on ${PORT}`));
+app.listen(PORT, () => {
+    console.log(`🚀 Proxy Backend Live on port ${PORT}`);
+    console.log(`🔒 PII Redaction Engine: Initialized`);
+});
