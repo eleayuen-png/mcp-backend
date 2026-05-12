@@ -20,12 +20,12 @@ const stripeKey = process.env.STRIPE_SECRET_KEY;
 const stripe = new Stripe(stripeKey || 'sk_test_dummy', { apiVersion: '2023-10-16' });
 
 /**
- * 🚩 MODEL SWITCH: 
- * Switching to "gemini-2.5-flash-preview-09-2025" (or gemini-2.5-flash) 
- * to bypass the current zero-quota restrictions on the 2.0 version.
+ * 🚩 STABILITY FIX: 
+ * Switching to "gemini-2.5-flash" (stable version) as requested.
+ * We also trim the key to ensure no whitespace from Render breaks the request.
  */
 const GEMINI_API_KEY = (process.env.GEMINI_API_KEY || "").trim(); 
-const GEMINI_MODEL = "gemini-2.5-flash-preview-09-2025"; 
+const GEMINI_MODEL = "gemini-2.5-flash"; 
 const APP_ID = 'mcp-studio-v1';
 
 let db: any = null;
@@ -53,7 +53,7 @@ app.use((req, res, next) => {
 });
 
 // ==========================================
-// 🪄 MAGIC SUGGEST (With Quota-Aware Batching & New Model)
+// 🪄 MAGIC SUGGEST (Batching & Gemini 2.5)
 // ==========================================
 app.post('/api/analyze-schema', async (req, res) => {
     const { endpoints } = req.body;
@@ -63,6 +63,7 @@ app.post('/api/analyze-schema', async (req, res) => {
     console.log(`[Magic] Analyzing ${endpoints.length} endpoints via ${GEMINI_MODEL}...`);
 
     try {
+        // CHUNKING: Send 20 endpoints at a time to stay under TPM limits
         const CHUNK_SIZE = 20;
         const chunks = [];
         for (let i = 0; i < endpoints.length; i += CHUNK_SIZE) {
@@ -79,6 +80,7 @@ app.post('/api/analyze-schema', async (req, res) => {
             const schemaSummary = chunk.map((e: any) => `- ID: "${e.id}" | Description: ${e.description}`).join('\n');
             const userPrompt = `List the best tools from this chunk:\n\n${schemaSummary}`;
 
+            // Using the v1beta endpoint with the new model name
             const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
             
             const result = await axios.post(url, {
@@ -94,6 +96,7 @@ app.post('/api/analyze-schema', async (req, res) => {
                 allSuggestions = [...allSuggestions, ...batchSuggestions];
             }
 
+            // RPM Safety Delay
             if (chunks.length > 1 && index < chunks.length - 1) {
                 await new Promise(resolve => setTimeout(resolve, 2000));
             }
@@ -107,13 +110,13 @@ app.post('/api/analyze-schema', async (req, res) => {
 
     } catch (error: any) {
         const msg = error.response?.data?.error?.message || error.message;
-        console.error("Magic Suggest Batch Error:", msg);
+        console.error("Magic Suggest Error:", msg);
         res.status(500).json({ suggestions: [], error: `Gemini Error: ${msg}` });
     }
 });
 
 // ==========================================
-// 🚀 REST OF SERVER (Deployment & SSE)
+// 🚀 DEPLOYMENT & SSE LOGIC
 // ==========================================
 async function getDeployment(serverId: string) {
     if (!db) return null;
@@ -130,7 +133,7 @@ app.post('/api/deploy', async (req, res) => {
         const publicUrl = process.env.RENDER_EXTERNAL_URL || `https://${req.get('host')}`;
         res.json({ success: true, sseUrl: `${publicUrl}/sse/${serverId}` });
     } catch (err: any) { res.status(500).json({ error: "Deploy Error", details: err.message }); }
-});
+} );
 
 const activeTransports = new Map<string, SSEServerTransport>();
 
@@ -163,4 +166,5 @@ app.post('/messages/:serverId', async (req, res) => {
     if (transport) await transport.handlePostMessage(req, res);
 });
 
-app.listen(process.env.PORT || 3000, () => console.log(`🚀 MCP Proxy Live (v1.3.8) with ${GEMINI_MODEL}`));
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`🚀 MCP Proxy Live (v1.3.8) with ${GEMINI_MODEL}`));
