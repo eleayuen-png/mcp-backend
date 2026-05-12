@@ -24,16 +24,15 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
 
+// Middleware to parse JSON bodies
+app.use(express.json({ limit: '50mb' }));
+
 // ==========================================
 // 🕵️ 2. MIDDLEWARE & LOGGING
 // ==========================================
 app.use((req, res, next) => {
-    console.log(`[NETWORK] ${req.method} request to ${req.path}`);
-    if (req.path.startsWith('/messages/') || req.path === '/api/webhook/stripe') {
-        next(); 
-    } else {
-        express.json({ limit: '50mb' })(req, res, next);
-    }
+    console.log(`[NETWORK SPY] ${req.method} request to ${req.path}`);
+    next();
 });
 
 // ==========================================
@@ -44,7 +43,7 @@ app.get('/', (req, res) => {
 });
 
 app.get('/health', (req, res) => {
-    res.status(200).send("🚀 MCP BACKEND IS ALIVE!");
+    res.status(200).send("🚀 MCP BACKEND IS ALIVE AND THE NEW CODE IS RUNNING!");
 });
 
 // ==========================================
