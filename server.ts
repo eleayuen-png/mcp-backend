@@ -20,10 +20,11 @@ const stripeKey = process.env.STRIPE_SECRET_KEY;
 const stripe = new Stripe(stripeKey || 'sk_test_dummy', { apiVersion: '2023-10-16' });
 
 /**
- * 🚩 SCHEMA FIX: 
- * We are using "gemini-1.5-flash" on the "v1beta" endpoint.
- * The "v1" endpoint does not recognize "systemInstruction" or "responseMimeType",
- * which was causing your "Unknown name" errors.
+ * 🚩 BILLED ACCOUNT STABILITY FIX (v1.4.8):
+ * We are moving to the "v1" Production endpoint. 
+ * Note: 'systemInstruction' and 'responseMimeType' are NOT supported on the v1 
+ * endpoint JSON schema. We will wrap our instructions directly into the 
+ * user prompt to ensure 100% compatibility across all regions.
  */
 const GEMINI_API_KEY = (process.env.GEMINI_API_KEY || "").trim(); 
 const GEMINI_MODEL = "gemini-1.5-flash"; 
@@ -54,14 +55,14 @@ app.use((req, res, next) => {
 });
 
 // ==========================================
-// 🪄 MAGIC SUGGEST (Fixed Payload)
+// 🪄 MAGIC SUGGEST (Resilient V1 Implementation)
 // ==========================================
 app.post('/api/analyze-schema', async (req, res) => {
     const { endpoints } = req.body;
     if (!GEMINI_API_KEY) return res.status(500).json({ error: "Gemini Key missing." });
     if (!endpoints || !Array.isArray(endpoints)) return res.status(400).json({ error: "Endpoints required." });
 
-    console.log(`[Magic] Analyzing ${endpoints.length} endpoints via ${GEMINI_MODEL}...`);
+    console.log(`[Magic] Analyzing ${endpoints.length} endpoints via ${GEMINI_MODEL} (v1)...`);
 
     try {
         const CHUNK_SIZE = 25;
@@ -71,39 +72,38 @@ app.post('/api/analyze-schema', async (req, res) => {
         }
 
         let allSuggestions: string[] = [];
-        const systemPrompt = "You are an AI Tool Architect. Suggest the 3-5 most useful endpoints from the provided list for an AI agent. Return valid JSON only.";
 
         for (const [index, chunk] of chunks.entries()) {
-            console.log(`[Magic] Processing batch ${index + 1}/${chunks.length}...`);
-            
             const schemaSummary = chunk.map((e: any) => `- ID: "${e.id}" | Description: ${e.description}`).join('\n');
-            const userPrompt = `Return a JSON object with a "suggestions" array containing the best tool IDs from this list:\n\n${schemaSummary}`;
+            
+            // 🚩 Instructions are bundled into the prompt for v1 compatibility
+            const userPrompt = `You are an AI Tool Architect. Suggest the 3-5 most useful endpoints from the provided list for an AI agent.
+            
+            CRITICAL: Return ONLY a JSON object with a "suggestions" key.
+            Format: {"suggestions": ["METHOD:PATH", "METHOD:PATH"]}
+            
+            Endpoints to analyze:
+            ${schemaSummary}`;
 
-            /**
-             * 🚩 THE FIX:
-             * 1. URL must use /v1beta/ to support systemInstruction and responseMimeType.
-             * 2. system_instruction (underscore) is often required by some SDKs, 
-             * but for the REST API v1beta, systemInstruction (camelCase) is standard.
-             */
-            const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+            // v1 endpoint is the most reliable for billed projects
+            const url = `https://generativelanguage.googleapis.com/v1/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
             
             const result = await axios.post(url, {
                 contents: [{ parts: [{ text: userPrompt }] }],
-                systemInstruction: { parts: [{ text: systemPrompt }] },
-                generationConfig: { 
-                    responseMimeType: "application/json", 
-                    temperature: 0.1 
-                }
+                generationConfig: { temperature: 0.1 }
             });
 
-            const aiRaw = result.data.candidates?.[0]?.content?.parts?.[0]?.text;
+            const aiRaw = result.data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+            
             if (aiRaw) {
+                // Strip markdown code blocks if the AI includes them
+                const cleanJson = aiRaw.replace(/```json/g, "").replace(/```/g, "").trim();
                 try {
-                    const parsed = JSON.parse(aiRaw);
+                    const parsed = JSON.parse(cleanJson);
                     const batchSuggestions = (parsed.suggestions || []).map((s: string) => s.trim());
                     allSuggestions = [...allSuggestions, ...batchSuggestions];
-                } catch (parseErr) {
-                    console.error("AI Response Parse Fail:", aiRaw);
+                } catch (pErr) {
+                    console.error("AI returned malformed JSON:", aiRaw);
                 }
             }
 
@@ -120,12 +120,12 @@ app.post('/api/analyze-schema', async (req, res) => {
     } catch (error: any) {
         const msg = error.response?.data?.error?.message || error.message;
         console.error("Magic Suggest Error:", msg);
-        res.status(500).json({ suggestions: [], error: `Gemini Error: ${msg}` });
+        res.status(500).json({ suggestions: [], error: `Gemini v1 Error: ${msg}` });
     }
 });
 
 // ==========================================
-// 🚀 DEPLOYMENT & SSE LOGIC (Preserved)
+// 🚀 DEPLOYMENT & SSE (Preserved)
 // ==========================================
 app.post('/api/deploy', async (req, res) => {
     try {
@@ -149,7 +149,7 @@ app.get('/sse/:serverId', async (req, res) => {
 
     const transport = new SSEServerTransport("/messages/" + serverId, res);
     activeTransports.set(serverId, transport);
-    const mcpServer = new Server({ name: "MCP-Studio", version: "1.4.7" }, { capabilities: { tools: {} } });
+    const mcpServer = new Server({ name: "MCP-Studio", version: "1.4.8" }, { capabilities: { tools: {} } });
     
     mcpServer.setRequestHandler(ListToolsRequestSchema, async () => ({
         tools: (vaultData.endpoints || []).map((ep: any) => ({
@@ -176,4 +176,4 @@ app.post('/messages/:serverId', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 MCP Proxy Live (v1.4.7) with ${GEMINI_MODEL}`));
+app.listen(PORT, () => console.log(`🚀 MCP Proxy Live (v1.4.8) with ${GEMINI_MODEL}`));
