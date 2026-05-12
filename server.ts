@@ -21,10 +21,11 @@ const stripe = new Stripe(stripeKey || 'sk_test_dummy', { apiVersion: '2023-10-1
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || ""; 
 /**
- * 🚩 STABILITY FIX: Switching to 1.5-flash-latest.
- * This model has the highest availability for the Free Tier.
+ * 🚩 COMPATIBILITY FIX: 
+ * Using "gemini-1.5-flash" (no -latest suffix) for maximum compatibility 
+ * with the v1beta endpoint.
  */
-const GEMINI_MODEL = "gemini-1.5-flash-latest"; 
+const GEMINI_MODEL = "gemini-1.5-flash"; 
 const APP_ID = 'mcp-studio-v1';
 
 let db: any = null;
@@ -63,15 +64,25 @@ async function getDeployment(serverId: string) {
     } catch (e) { return null; }
 }
 
+/**
+ * 🛠 DEBUG ENDPOINT: List Available Models
+ * Visit this in your browser to see what your API Key supports.
+ */
+app.get('/api/models', async (req, res) => {
+    try {
+        const response = await axios.get(`https://generativelanguage.googleapis.com/v1beta/models?key=${GEMINI_API_KEY}`);
+        res.json(response.data);
+    } catch (error: any) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
 app.get('/api/health', (req, res) => res.json({ status: "ok", model: GEMINI_MODEL, dbConnected: !!db }));
 
 // ==========================================
 // 📡 3. PUBLIC API ROUTES
 // ==========================================
 
-/**
- * 🪄 MAGIC SUGGEST
- */
 app.post('/api/analyze-schema', async (req, res) => {
     const { endpoints } = req.body;
     
@@ -99,7 +110,7 @@ app.post('/api/analyze-schema', async (req, res) => {
         const aiRaw = result.data.candidates?.[0]?.content?.parts?.[0]?.text;
 
         if (!aiRaw) {
-             return res.status(500).json({ suggestions: [], error: "AI returned no content. Quota might be limited." });
+             return res.status(500).json({ suggestions: [], error: "AI returned no content. Check /api/models for availability." });
         }
 
         const parsed = JSON.parse(aiRaw);
@@ -110,7 +121,6 @@ app.post('/api/analyze-schema', async (req, res) => {
         res.json({ suggestions, matched });
 
     } catch (error: any) {
-        // If we still hit a quota error, provide the user with the retry time.
         const realErrorReason = error.response?.data?.error?.message || error.message || "Unknown AI Error";
         console.error("Magic Suggest Error:", realErrorReason);
         res.status(500).json({ suggestions: [], error: realErrorReason });
