@@ -19,12 +19,12 @@ const stripeKey = process.env.STRIPE_SECRET_KEY;
 // @ts-ignore
 const stripe = new Stripe(stripeKey || 'sk_test_dummy', { apiVersion: '2023-10-16' });
 
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || ""; 
 /**
- * 🚩 STABILITY FIX: Using "gemini-1.5-flash-8b".
- * This is the most available model for free-tier users across all regions.
+ * 🚩 MODEL UPGRADE:
+ * Switching to "gemini-2.0-flash" for better availability and performance.
  */
-const GEMINI_MODEL = "gemini-1.5-flash-8b"; 
+const GEMINI_API_KEY = (process.env.GEMINI_API_KEY || "").trim(); 
+const GEMINI_MODEL = "gemini-2.0-flash"; 
 const APP_ID = 'mcp-studio-v1';
 
 let db: any = null;
@@ -63,20 +63,29 @@ async function getDeployment(serverId: string) {
 }
 
 /**
- * 🛠 DEBUG ENDPOINT
- * If this returns a 400, your API Key is likely invalid or has a trailing space.
+ * 🛠 DEBUG ENDPOINT: Verify Key & Model Support
  */
 app.get('/api/models', async (req, res) => {
-    if (!GEMINI_API_KEY) return res.status(500).json({ error: "API Key is missing from Environment Variables." });
+    if (!GEMINI_API_KEY) {
+        return res.status(500).json({ error: "Backend error: GEMINI_API_KEY is not set in Render Environment Variables." });
+    }
 
     try {
-        // We use v1beta to list models
-        const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${GEMINI_API_KEY.trim()}`;
+        const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${GEMINI_API_KEY}`;
         const response = await axios.get(url);
-        res.json(response.data);
+        res.json({ 
+            status: "success", 
+            active_model: GEMINI_MODEL,
+            key_preview: `${GEMINI_API_KEY.substring(0, 5)}...`,
+            models: response.data.models 
+        });
     } catch (error: any) {
         const googleError = error.response?.data?.error?.message || error.message;
-        res.status(error.response?.status || 500).json({ error: "Google API rejected the request", details: googleError });
+        res.status(error.response?.status || 500).json({ 
+            error: "Google rejected your API Key", 
+            details: googleError,
+            hint: "If using a free key, ensure you are not hitting rate limits." 
+        });
     }
 });
 
@@ -94,24 +103,22 @@ app.post('/api/analyze-schema', async (req, res) => {
     try {
         const schemaSummary = endpoints.slice(0, 100).map((e: any) => `- ID: "${e.id}" | Description: ${e.description}`).join('\n');
         
-        const systemPrompt = `You are an AI Tool Architect. Suggest the most useful API endpoints.
-        CRITICAL: You must return valid JSON. 
+        const systemPrompt = `You are an AI Tool Architect. Suggest the 5-10 most useful endpoints for an AI agent.
+        CRITICAL: Return valid JSON. 
         CRITICAL: The IDs you suggest MUST EXACTLY match the IDs in the provided list.
         Format: {"suggestions": ["METHOD:PATH", "METHOD:PATH"]}`;
 
-        const userPrompt = `Choose the 5-10 best tools from this list. Return ONLY the IDs:\n\n${schemaSummary}`;
+        const userPrompt = `List the best tools from this schema:\n\n${schemaSummary}`;
 
-        // Ensure key is trimmed to prevent accidental spaces causing 400 errors
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY.trim()}`;
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
         
         const result = await axios.post(url, {
             contents: [{ parts: [{ text: userPrompt }] }],
             systemInstruction: { parts: [{ text: systemPrompt }] },
             generationConfig: { responseMimeType: "application/json", temperature: 0.1 }
-        }, { timeout: 15000 });
+        });
         
         const aiRaw = result.data.candidates?.[0]?.content?.parts?.[0]?.text;
-
         if (!aiRaw) throw new Error("AI returned no content.");
 
         const parsed = JSON.parse(aiRaw);
@@ -119,18 +126,15 @@ app.post('/api/analyze-schema', async (req, res) => {
         const validIds = endpoints.map((e: any) => e.id);
         const matched = suggestions.filter((s: string) => validIds.includes(s));
         
-        res.json({ suggestions, matched });
+        res.json({ suggestions: matched });
 
     } catch (error: any) {
-        const realErrorReason = error.response?.data?.error?.message || error.message || "Unknown AI Error";
-        console.error("Magic Suggest Error:", realErrorReason);
-        res.status(500).json({ suggestions: [], error: `Gemini API Error: ${realErrorReason}` });
+        const msg = error.response?.data?.error?.message || error.message;
+        console.error("Magic Suggest Error:", msg);
+        res.status(500).json({ suggestions: [], error: `Gemini Error: ${msg}` });
     }
 });
 
-/**
- * 🚀 DEPLOYMENT
- */
 app.post('/api/deploy', async (req, res) => {
     try {
         const { apiKey, endpoints, baseUrl, piiMasking } = req.body;
@@ -169,7 +173,7 @@ app.get('/sse/:serverId', async (req, res) => {
     const transport = new SSEServerTransport("/messages/" + serverId, res);
     activeTransports.set(serverId, transport);
 
-    const mcpServer = new Server({ name: "MCP-Studio-Proxy", version: "1.0.0" }, { capabilities: { tools: {} } });
+    const mcpServer = new Server({ name: "MCP-Studio-Proxy", version: "1.3.6" }, { capabilities: { tools: {} } });
 
     mcpServer.setRequestHandler(ListToolsRequestSchema, async () => ({
         tools: (vaultData.endpoints || []).map((ep: any) => ({
@@ -209,4 +213,4 @@ app.post('/messages/:serverId', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 MCP Proxy Live`));
+app.listen(PORT, () => console.log(`🚀 MCP Proxy Live (v1.3.6)`));
