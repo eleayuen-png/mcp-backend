@@ -192,4 +192,10 @@ app.post('/messages/:serverId', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 MCP Proxy Live (v1.5.2) with ${GEMINI_MODEL}`));
+
+// 🚩 CRITICAL FIX: We added '0.0.0.0' here. 
+// In Docker/Render, this explicitly tells the server to accept traffic from the outside internet, 
+// not just from inside its own container. Without this, Render blocks the traffic before it reaches your code!
+app.listen(PORT as number, '0.0.0.0', () => {
+    console.log(`🚀 MCP Proxy Live (v1.5.3) on port ${PORT} with ${GEMINI_MODEL}`);
+});
