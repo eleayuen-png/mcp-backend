@@ -11,14 +11,22 @@ import { getFirestore } from 'firebase-admin/firestore';
 
 const app = express();
 
-// Harden CORS for GitHub Pages and local development
-app.use(cors({
+// 1. Define the CORS rules once
+const corsOptions = {
     origin: ['https://eleayuen-png.github.io', 'http://localhost:5173', 'http://localhost:3000'],
     methods: ['GET', 'POST', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
     credentials: true
-}));
-app.options('*', cors()); // Explicitly handle pre-flight requests
+};
+
+// 2. Apply rules to all standard routes
+app.use(cors(corsOptions));
+
+// 3. Apply the EXACT SAME rules to pre-flight (OPTIONS) requests
+app.options('*', cors(corsOptions));
+
+// Middleware to parse JSON bodies
+app.use(express.json());
 
 // ==========================================
 // 🕵️ 2. THE SPY (Logging)
@@ -38,6 +46,31 @@ app.get('/health', (req, res) => {
 // ==========================================
 // 4. INITIALIZATION
 // ==========================================
+
+// Dummy route to ensure the server responds to health checks from Render
+app.get('/', (req, res) => {
+    res.status(200).send('MCP Proxy Backend is running!');
+});
+
+// Your deploy endpoint
+app.post('/api/deploy', (req, res) => {
+    try {
+        const { endpoints, baseUrl, piiMasking } = req.body;
+        
+        // Mocking a successful deployment response for the MVP
+        const sseUrl = `https://mcp-proxy-backend.onrender.com/sse/${Math.random().toString(36).substring(7)}`;
+        
+        res.status(200).json({
+            success: true,
+            sseUrl: sseUrl,
+            message: 'Gateway deployed successfully.'
+        });
+    } catch (error) {
+        console.error('Deployment error:', error);
+        res.status(500).json({ error: 'Failed to deploy gateway.' });
+    }
+});
+
 const stripeKey = process.env.STRIPE_SECRET_KEY;
 // @ts-ignore
 const stripe = new Stripe(stripeKey || 'sk_test_dummy', { apiVersion: '2023-10-16' });
