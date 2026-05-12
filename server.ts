@@ -1,13 +1,21 @@
 import express from 'express';
 import cors from 'cors';
 import { v4 as uuidv4 } from 'uuid';
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
-import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import axios from 'axios';
 import Stripe from 'stripe';
 import { initializeApp, cert, getApps } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
+
+// ==========================================
+// 🛡️ 0. CRASH PROTECTION
+// ==========================================
+// Catch any top-level exceptions so Render logs them instead of silently crashing
+process.on('uncaughtException', (err) => {
+    console.error('🔥 CRITICAL UNCAUGHT EXCEPTION:', err);
+});
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('🔥 CRITICAL UNHANDLED REJECTION:', reason);
+});
 
 const app = express();
 
@@ -50,8 +58,14 @@ app.get('/health', (req, res) => {
 // 🔧 4. SERVICES INITIALIZATION
 // ==========================================
 const stripeKey = process.env.STRIPE_SECRET_KEY;
-// @ts-ignore
-const stripe = new Stripe(stripeKey || 'sk_test_dummy', { apiVersion: '2023-10-16' });
+let stripe: any = null;
+try {
+    // Failsafe for CommonJS/ESM interop with Stripe class
+    const StripeClient = (Stripe as any).default || Stripe;
+    stripe = new StripeClient(stripeKey || 'sk_test_dummy', { apiVersion: '2023-10-16' });
+} catch (e: any) {
+    console.error("❌ Stripe Init Failed:", e.message);
+}
 
 const GEMINI_API_KEY = (process.env.GEMINI_API_KEY || "").trim(); 
 const GEMINI_MODEL = "gemini-2.5-flash"; 
@@ -157,50 +171,74 @@ app.post('/api/deploy', async (req, res) => {
     }
 });
 
-const activeTransports = new Map<string, SSEServerTransport>();
+const activeTransports = new Map<string, any>(); // Using 'any' because SSEServerTransport is dynamically imported
 
 app.get('/sse/:serverId', async (req, res) => {
-    const serverId = req.params.serverId;
-    if (!db) return res.status(500).send("DB Error");
-    
-    const doc = await db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('deployments').doc(serverId).get();
-    if (!doc.exists) return res.status(404).send("Not found.");
-    
-    const vaultData = doc.data();
-    const transport = new SSEServerTransport("/messages/" + serverId, res);
-    
-    activeTransports.set(serverId, transport);
-    const mcpServer = new Server({ name: "MCP-Studio", version: "1.5.4" }, { capabilities: { tools: {} } });
-    
-    mcpServer.setRequestHandler(ListToolsRequestSchema, async () => ({
-        tools: (vaultData.endpoints || []).map((ep: any) => ({
-            name: `${ep.method}_${ep.path.replace(/[^a-zA-Z0-9]/g, '_')}`.toLowerCase(),
-            description: ep.description || `Call ${ep.method} ${ep.path}`,
-            inputSchema: { type: "object", properties: { params: { type: "object" }, body: { type: "object" } } }
-        }))
-    }));
-
-    mcpServer.setRequestHandler(CallToolRequestSchema, async (req) => {
-        const toolName = req.params.name.toLowerCase();
-        const ep = vaultData.endpoints.find((e: any) => `${e.method}_${e.path.replace(/[^a-zA-Z0-9]/g, '_')}`.toLowerCase() === toolName);
-        if (!ep) throw new Error("Tool not found.");
+    try {
+        const serverId = req.params.serverId;
+        if (!db) return res.status(500).send("DB Error");
         
-        const resp = await axios({ method: ep.method, url: `${vaultData.baseUrl}${ep.path}` });
-        return { content: [{ type: "text", text: JSON.stringify(resp.data, null, 2) }] };
-    });
+        const doc = await db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('deployments').doc(serverId).get();
+        if (!doc.exists) return res.status(404).send("Not found.");
+        
+        const vaultData = doc.data() || {};
+        
+        // 🚨 CRITICAL FIX: Dynamically import MCP SDK modules to prevent ESM startup crash!
+        const { Server } = await import("@modelcontextprotocol/sdk/server/index.js");
+        const { SSEServerTransport } = await import("@modelcontextprotocol/sdk/server/sse.js");
+        const { CallToolRequestSchema, ListToolsRequestSchema } = await import("@modelcontextprotocol/sdk/types.js");
 
-    await mcpServer.connect(transport);
+        const transport = new SSEServerTransport("/messages/" + serverId, res);
+        
+        activeTransports.set(serverId, transport);
+        const mcpServer = new Server({ name: "MCP-Studio", version: "1.5.4" }, { capabilities: { tools: {} } });
+        
+        mcpServer.setRequestHandler(ListToolsRequestSchema, async () => ({
+            tools: (vaultData.endpoints || []).map((ep: any) => ({
+                name: `${ep.method}_${ep.path.replace(/[^a-zA-Z0-9]/g, '_')}`.toLowerCase(),
+                description: ep.description || `Call ${ep.method} ${ep.path}`,
+                inputSchema: { type: "object", properties: { params: { type: "object" }, body: { type: "object" } } }
+            }))
+        }));
+
+        mcpServer.setRequestHandler(CallToolRequestSchema, async (req: any) => {
+            const toolName = req.params.name.toLowerCase();
+            const ep = vaultData.endpoints.find((e: any) => `${e.method}_${e.path.replace(/[^a-zA-Z0-9]/g, '_')}`.toLowerCase() === toolName);
+            if (!ep) throw new Error("Tool not found.");
+            
+            const resp = await axios({ method: ep.method, url: `${vaultData.baseUrl}${ep.path}` });
+            return { content: [{ type: "text", text: JSON.stringify(resp.data, null, 2) }] };
+        });
+
+        await mcpServer.connect(transport);
+    } catch (err: any) {
+        console.error("SSE Setup Error:", err);
+        if (!res.headersSent) res.status(500).send("Internal SSE Error");
+    }
 });
 
 app.post('/messages/:serverId', async (req, res) => {
-    const transport = activeTransports.get(req.params.serverId);
-    if (transport) await transport.handlePostMessage(req, res);
+    try {
+        const transport = activeTransports.get(req.params.serverId);
+        if (transport) {
+            await transport.handlePostMessage(req, res);
+        } else {
+            res.status(404).send("Transport not found");
+        }
+    } catch (err: any) {
+        console.error("Message Error:", err);
+        if (!res.headersSent) res.status(500).send("Message Error");
+    }
 });
 
 // ==========================================
 // 🏁 7. START SERVER
 // ==========================================
-const PORT = parseInt(process.env.PORT || '3000', 10);
-app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🚀 MCP Proxy Live (v1.5.4) on port ${PORT} with ${GEMINI_MODEL}`);
-});
+try {
+    const PORT = Number(process.env.PORT) || 3000;
+    app.listen(PORT, '0.0.0.0', () => {
+        console.log(`🚀 MCP Proxy Live (v1.5.4) on port ${PORT} with ${GEMINI_MODEL}`);
+    });
+} catch (startError) {
+    console.error("🔥 Failed to bind server port:", startError);
+}
