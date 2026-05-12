@@ -20,8 +20,11 @@ const stripeKey = process.env.STRIPE_SECRET_KEY;
 const stripe = new Stripe(stripeKey || 'sk_test_dummy', { apiVersion: '2023-10-16' });
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || ""; 
-// 🚩 PERMANENT FIX: Using the universally available public model for Render
-const GEMINI_MODEL = "gemini-2.0-flash"; 
+/**
+ * 🚩 STABILITY FIX: Switching to 1.5-flash-latest.
+ * This model has the highest availability for the Free Tier.
+ */
+const GEMINI_MODEL = "gemini-1.5-flash-latest"; 
 const APP_ID = 'mcp-studio-v1';
 
 let db: any = null;
@@ -33,7 +36,7 @@ try {
         }
         db = getFirestore();
         db.settings({ ignoreUndefinedProperties: true });
-        console.log("🔥 Firestore v1.3.5 Ready.");
+        console.log("🔥 Firestore Ready.");
     }
 } catch (e: any) { 
     console.error("❌ Firebase Init Failed:", e.message); 
@@ -60,50 +63,20 @@ async function getDeployment(serverId: string) {
     } catch (e) { return null; }
 }
 
-app.get('/api/health', (req, res) => res.json({ status: "ok", version: "1.3.5", dbConnected: !!db }));
+app.get('/api/health', (req, res) => res.json({ status: "ok", model: GEMINI_MODEL, dbConnected: !!db }));
 
 // ==========================================
-// 💳 3. STRIPE WEBHOOK
-// ==========================================
-app.post('/api/webhook/stripe', express.raw({ type: 'application/json' }), async (req, res) => {
-    const sig = req.headers['stripe-signature'];
-    const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
-    
-    if (!sig || !webhookSecret) return res.status(400).send("Missing Stripe config");
-
-    try {
-        const event = stripe.webhooks.constructEvent(req.body, sig as string, webhookSecret);
-        if (event.type === 'checkout.session.completed') {
-            const session = event.data.object as any;
-            const userId = session.client_reference_id; 
-            if (userId && db) {
-                const userDocRef = db.collection('artifacts').doc(APP_ID).collection('users').doc(userId).collection('project').doc('current');
-                await userDocRef.set({ isPro: true }, { merge: true });
-                console.log(`✅ Webhook Success: User ${userId} upgraded to Pro.`);
-            }
-        }
-    } catch (err: any) { 
-        console.error("Webhook Error:", err.message);
-        return res.status(400).send(`Webhook Error: ${err.message}`); 
-    }
-    res.send();
-});
-
-// ==========================================
-// 📡 4. PUBLIC API ROUTES
+// 📡 3. PUBLIC API ROUTES
 // ==========================================
 
 /**
  * 🪄 MAGIC SUGGEST
  */
 app.post('/api/analyze-schema', async (req, res) => {
-    console.log("========== MAGIC SUGGEST TRIGGERED ==========");
     const { endpoints } = req.body;
     
     if (!GEMINI_API_KEY) return res.status(500).json({ error: "Gemini Key missing on server." });
     if (!endpoints || !Array.isArray(endpoints)) return res.status(400).json({ error: "Endpoints required." });
-
-    console.log(`[Diagnostic] Received ${endpoints.length} endpoints from frontend.`);
 
     try {
         const schemaSummary = endpoints.slice(0, 100).map((e: any) => `- ID: "${e.id}" | Description: ${e.description}`).join('\n');
@@ -111,7 +84,6 @@ app.post('/api/analyze-schema', async (req, res) => {
         const systemPrompt = `You are an AI Tool Architect. Suggest the most useful API endpoints.
         CRITICAL: You must return valid JSON. 
         CRITICAL: The IDs you suggest MUST EXACTLY match the IDs in the provided list.
-        Include the exact Method and Path as they appear in the ID string.
         Format: {"suggestions": ["METHOD:PATH", "METHOD:PATH"]}`;
 
         const userPrompt = `Choose the 5-10 best tools from this list. Return ONLY the IDs:\n\n${schemaSummary}`;
@@ -125,36 +97,23 @@ app.post('/api/analyze-schema', async (req, res) => {
         }, { timeout: 15000 });
         
         const aiRaw = result.data.candidates?.[0]?.content?.parts?.[0]?.text;
-        console.log(`[Diagnostic] RAW AI Response:\n`, aiRaw);
 
         if (!aiRaw) {
-             return res.status(500).json({ suggestions: [], error: "AI returned no content" });
+             return res.status(500).json({ suggestions: [], error: "AI returned no content. Quota might be limited." });
         }
 
-        let suggestions: string[] = [];
-        try {
-            const parsed = JSON.parse(aiRaw);
-            suggestions = (parsed.suggestions || []).map((s: string) => s.replace(/"/g, '').trim());
-        } catch (innerParseErr) {
-            console.log("[Diagnostic] Standard JSON parse failed, trying regex match...");
-            const jsonMatch = aiRaw.match(/\{[\s\S]*\}/);
-            if (jsonMatch) {
-                const parsed = JSON.parse(jsonMatch[0]);
-                suggestions = (parsed.suggestions || []).map((s: string) => s.replace(/"/g, '').trim());
-            } else {
-                throw new Error("Could not parse AI response as JSON");
-            }
-        }
-
+        const parsed = JSON.parse(aiRaw);
+        const suggestions = (parsed.suggestions || []).map((s: string) => s.replace(/"/g, '').trim());
         const validIds = endpoints.map((e: any) => e.id);
         const matched = suggestions.filter((s: string) => validIds.includes(s));
         
         res.json({ suggestions, matched });
 
     } catch (error: any) {
+        // If we still hit a quota error, provide the user with the retry time.
         const realErrorReason = error.response?.data?.error?.message || error.message || "Unknown AI Error";
-        console.error("[Diagnostic] Magic Suggest Error:", realErrorReason);
-        res.status(500).json({ suggestions: [], error: `Gemini API Error: ${realErrorReason}` });
+        console.error("Magic Suggest Error:", realErrorReason);
+        res.status(500).json({ suggestions: [], error: realErrorReason });
     }
 });
 
@@ -177,32 +136,29 @@ app.post('/api/deploy', async (req, res) => {
         
         if (db) {
             await db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('deployments').doc(serverId).set(config);
-            console.log(`[Vault] Deployed server config for: ${serverId}`);
         }
 
         const publicUrl = process.env.RENDER_EXTERNAL_URL || `https://${req.get('host')}`;
         res.json({ success: true, sseUrl: `${publicUrl}/sse/${serverId}` });
     } catch (err: any) {
-        console.error("Deploy Error:", err.message);
         res.status(500).json({ error: "Deploy Error", details: err.message });
     }
 });
 
 // ==========================================
-// 📡 5. MCP SSE SERVER LOGIC
+// 📡 4. MCP SSE SERVER LOGIC
 // ==========================================
 const activeTransports = new Map<string, SSEServerTransport>();
 
 app.get('/sse/:serverId', async (req, res) => {
     const serverId = req.params.serverId;
     const vaultData = await getDeployment(serverId);
-    
-    if (!vaultData) return res.status(404).send("Deployment not found. Please re-deploy from MCP Studio.");
+    if (!vaultData) return res.status(404).send("Deployment not found.");
 
     const transport = new SSEServerTransport("/messages/" + serverId, res);
     activeTransports.set(serverId, transport);
 
-    const mcpServer = new Server({ name: "MCP-Studio-Proxy", version: "1.3.5" }, { capabilities: { tools: {} } });
+    const mcpServer = new Server({ name: "MCP-Studio-Proxy", version: "1.0.0" }, { capabilities: { tools: {} } });
 
     mcpServer.setRequestHandler(ListToolsRequestSchema, async () => ({
         tools: (vaultData.endpoints || []).map((ep: any) => ({
@@ -216,7 +172,6 @@ app.get('/sse/:serverId', async (req, res) => {
         const toolName = request.params.name.toLowerCase();
         const args = request.params.arguments as any;
         const endpoint = vaultData.endpoints.find((e: any) => `${e.method}_${e.path.replace(/[^a-zA-Z0-9]/g, '_')}`.toLowerCase() === toolName);
-        
         if (!endpoint) throw new Error(`Tool not recognized.`);
 
         const isGet = endpoint.method.toUpperCase() === 'GET';
@@ -236,8 +191,6 @@ app.get('/sse/:serverId', async (req, res) => {
     await mcpServer.connect(transport);
 });
 
-app.post('/sse/:serverId', (req, res) => res.status(200).json({ status: "Use GET for SSE" }));
-
 app.post('/messages/:serverId', async (req, res) => {
     const transport = activeTransports.get(req.params.serverId);
     if (!transport) return res.status(404).send("Session expired.");
@@ -245,4 +198,4 @@ app.post('/messages/:serverId', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 MCP Proxy v1.3.5 Live on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 MCP Proxy Live with ${GEMINI_MODEL}`));
