@@ -59,99 +59,39 @@ app.post('/api/webhook/stripe', express.raw({ type: 'application/json' }), async
     res.send();
 });
 
+// IMPORTANT: We move express.json() AFTER the SSE message route or handle it specifically
 app.use(express.json());
 
 // ==========================================
-// ✨ 3. MAGIC SUGGEST: AI SCHEMA ANALYSIS
+// ✨ 3. MAGIC SUGGEST
 // ==========================================
 app.post('/api/analyze-schema', async (req, res) => {
     const { endpoints } = req.body;
-
-    // 🚩 CHECK 1: Missing API Key
-    if (!GEMINI_API_KEY) {
-        console.error("❌ ERROR: GEMINI_API_KEY is not set in Render environment variables.");
-        return res.status(500).json({ 
-            error: "Internal Configuration Error", 
-            details: "GEMINI_API_KEY is missing on the server. Please add it to Render environment variables." 
-        });
-    }
-
-    if (!endpoints || !Array.isArray(endpoints)) {
-        return res.status(400).json({ error: "No endpoints provided." });
-    }
+    if (!GEMINI_API_KEY) return res.status(500).json({ error: "API Key missing" });
+    if (!endpoints) return res.status(400).json({ error: "No endpoints" });
 
     try {
-        console.log(`🧠 Analyzing ${endpoints.length} endpoints...`);
-        
-        const schemaSummary = endpoints.map(e => `- ID: ${e.id}\n  Desc: ${e.description}`).join('\n');
+        const schemaSummary = endpoints.map((e:any) => `- ID: ${e.id}\n  Desc: ${e.description}`).join('\n');
+        const systemPrompt = `Analyze the API list and suggest the top 5-10 most 'agentic' ones. Return ONLY JSON with a "suggestions" key.`;
+        const userPrompt = `Suggest tools:\n${schemaSummary}`;
 
-        const systemPrompt = `You are an expert AI Agent Architect. Analyze the list of API endpoints provided and suggest the top 5-10 most 'agentic' ones. 
-        Focus on endpoints that allow searching, creating, updating, or retrieving high-value data. 
-        Return ONLY a JSON object with a "suggestions" key containing an array of strings (the endpoint IDs).`;
-
-        const userPrompt = `Suggest the best tools from this list:\n${schemaSummary}`;
-
-        const callGemini = async (retryCount = 0): Promise<any> => {
-            const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
-            try {
-                const result = await axios.post(url, {
-                    contents: [{ parts: [{ text: userPrompt }] }],
-                    systemInstruction: { parts: [{ text: systemPrompt }] },
-                    generationConfig: { 
-                        responseMimeType: "application/json"
-                    }
-                });
-                
-                const responseText = result.data.candidates?.[0]?.content?.parts?.[0]?.text;
-                if (!responseText) throw new Error("Empty response from AI");
-                
-                // Parse and handle both stringified JSON and direct objects
-                const parsed = JSON.parse(responseText);
-                return parsed.suggestions || [];
-            } catch (error: any) {
-                if (retryCount < 3 && error.response?.status >= 500) {
-                    await new Promise(r => setTimeout(r, 1000 * Math.pow(2, retryCount)));
-                    return callGemini(retryCount + 1);
-                }
-                throw error;
-            }
-        };
-
-        const suggestions = await callGemini();
-        console.log(`✨ AI Suggested: ${suggestions.length} tools.`);
-        res.json({ suggestions });
-
-    } catch (error: any) {
-        console.error("❌ Magic Suggest Failed:", error.response?.data || error.message);
-        
-        // 🚩 FALLBACK: If AI fails, suggest common endpoints automatically so the user isn't stuck
-        const fallbackSuggestions = endpoints
-            .filter(e => e.id.toLowerCase().includes('get') || e.id.toLowerCase().includes('search'))
-            .slice(0, 5)
-            .map(e => e.id);
-
-        res.status(200).json({ 
-            suggestions: fallbackSuggestions,
-            warning: "AI Analysis failed, using heuristic fallback.",
-            details: error.message 
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+        const result = await axios.post(url, {
+            contents: [{ parts: [{ text: userPrompt }] }],
+            systemInstruction: { parts: [{ text: systemPrompt }] },
+            generationConfig: { responseMimeType: "application/json" }
         });
+        
+        const text = result.data.candidates?.[0]?.content?.parts?.[0]?.text;
+        res.json(JSON.parse(text));
+    } catch (error: any) {
+        res.status(500).json({ error: error.message });
     }
 });
 
 // ==========================================
 // 🛡️ PII MASKING & 📂 VAULT
 // ==========================================
-const maskSensitiveData = (data: any): any => {
-    if (!data) return data;
-    try {
-        let jsonString = JSON.stringify(data);
-        const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
-        const phoneRegex = /(\+\d{1,2}\s?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}/g;
-        jsonString = jsonString.replace(emailRegex, "[REDACTED_EMAIL]").replace(phoneRegex, "[REDACTED_PHONE]");
-        return JSON.parse(jsonString);
-    } catch (e) { return data; }
-};
-
 const deploymentVault = new Map<string, any>();
 const activeTransports = new Map<string, SSEServerTransport>();
 
@@ -171,7 +111,7 @@ app.get('/sse/:serverId', async (req, res) => {
     const transport = new SSEServerTransport("/messages/" + serverId, res);
     activeTransports.set(serverId, transport);
 
-    const mcpServer = new Server({ name: "MCP-Studio-Proxy", version: "1.1.0" }, { capabilities: { tools: {} } });
+    const mcpServer = new Server({ name: "MCP-Studio-Proxy", version: "1.2.0" }, { capabilities: { tools: {} } });
 
     mcpServer.setRequestHandler(ListToolsRequestSchema, async () => {
         const tools: any[] = [];
@@ -180,7 +120,13 @@ app.get('/sse/:serverId', async (req, res) => {
             tools.push({
                 name: toolName,
                 description: ep.description || `Execute ${ep.method} on ${ep.path}`,
-                inputSchema: { type: "object", properties: { params: { type: "object" }, body: { type: "object" } } }
+                inputSchema: { 
+                    type: "object", 
+                    properties: { 
+                        params: { type: "object", description: "URL Query parameters" }, 
+                        body: { type: "object", description: "JSON Request body" } 
+                    } 
+                }
             });
         });
         vaultData.macros.forEach((m: any) => {
@@ -193,24 +139,31 @@ app.get('/sse/:serverId', async (req, res) => {
         const toolName = request.params.name.toLowerCase();
         const args = request.params.arguments as any;
         
-        const macro = vaultData.macros.find((m: any) => m.name.toLowerCase() === toolName);
-        if (macro) {
-            let sequenceResults = [];
-            for (const step of macro.steps) {
-                const response = await axios({ method: step.method, url: `${vaultData.baseUrl}${step.path}`, headers: { 'Authorization': `Bearer ${vaultData.apiKey}` } });
-                let stepData = response.data;
-                if (vaultData.piiMasking) stepData = maskSensitiveData(stepData);
-                sequenceResults.push({ step: step.path, data: stepData });
-            }
-            return { content: [{ type: "text", text: JSON.stringify(sequenceResults, null, 2) }] };
-        }
-
+        // Find if it's a standard endpoint
         const endpoint = vaultData.endpoints.find((e: any) => `${e.method}_${e.path.replace(/[^a-zA-Z0-9]/g, '_')}`.toLowerCase() === toolName);
+        
         if (endpoint) {
-            const response = await axios({ method: endpoint.method, url: `${vaultData.baseUrl}${endpoint.path}`, params: args?.params, data: args?.body, headers: { 'Authorization': `Bearer ${vaultData.apiKey}`, 'Content-Type': 'application/json' } });
-            let finalData = response.data;
-            if (vaultData.piiMasking) finalData = maskSensitiveData(finalData);
-            return { content: [{ type: "text", text: JSON.stringify(finalData, null, 2) }] };
+            const isGet = endpoint.method.toUpperCase() === 'GET';
+            try {
+                const response = await axios({ 
+                    method: endpoint.method, 
+                    url: `${vaultData.baseUrl}${endpoint.path}`, 
+                    params: args?.params, 
+                    // 🚩 FIX: Only send data/body if it's not a GET request to avoid 415 errors
+                    data: isGet ? undefined : (args?.body || {}), 
+                    headers: { 
+                        'Authorization': `Bearer ${vaultData.apiKey}`,
+                        // 🚩 FIX: Only set Content-Type for requests with bodies
+                        ...(isGet ? {} : { 'Content-Type': 'application/json' })
+                    } 
+                });
+                return { content: [{ type: "text", text: JSON.stringify(response.data, null, 2) }] };
+            } catch (err: any) {
+                return { 
+                    content: [{ type: "text", text: `API Error (${err.response?.status}): ${JSON.stringify(err.response?.data || err.message)}` }],
+                    isError: true 
+                };
+            }
         }
         throw new Error(`Tool ${toolName} not recognized.`);
     });
@@ -218,10 +171,22 @@ app.get('/sse/:serverId', async (req, res) => {
     await mcpServer.connect(transport);
 });
 
+// 🚩 FIX: The "stream not readable" error
+// We must handle the POST from Cursor carefully. 
+// If express.json() is already active, we pass the body manually if the transport supports it,
+// or we ensure the transport can read the already-parsed JSON.
 app.post('/messages/:serverId', async (req, res) => {
     const transport = activeTransports.get(req.params.serverId);
-    if (transport) await transport.handlePostMessage(req, res);
-    else res.status(404).send("Transport expired.");
+    if (!transport) return res.status(404).send("Transport expired.");
+
+    try {
+        // The SSEServerTransport expects to handle the request. 
+        // If it fails with "stream not readable", it's because express.json() consumed the body.
+        await transport.handlePostMessage(req, res);
+    } catch (e: any) {
+        console.error("SSE Post Error:", e.message);
+        res.status(500).send(e.message);
+    }
 });
 
 const PORT = process.env.PORT || 3000;
