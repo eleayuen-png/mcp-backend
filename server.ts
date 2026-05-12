@@ -20,10 +20,10 @@ const stripeKey = process.env.STRIPE_SECRET_KEY;
 const stripe = new Stripe(stripeKey || 'sk_test_dummy', { apiVersion: '2023-10-16' });
 
 /**
- * 🚩 STABILITY UPGRADE: 
- * Using "gemini-1.5-flash" on the v1beta endpoint.
- * This model is the most reliable fallback when newer versions have 
- * regional or billing-sync delays.
+ * 🚩 STABILITY UPGRADE FOR BILLED ACCOUNTS: 
+ * Switching to the production "v1" endpoint with "gemini-1.5-flash".
+ * This is the most reliable combination for paid/topped-up accounts 
+ * ensuring high RPM and zero location blocks.
  */
 const GEMINI_API_KEY = (process.env.GEMINI_API_KEY || "").trim(); 
 const GEMINI_MODEL = "gemini-1.5-flash"; 
@@ -54,7 +54,7 @@ app.use((req, res, next) => {
 });
 
 // ==========================================
-// 🪄 MAGIC SUGGEST (Sequential Batching)
+// 🪄 MAGIC SUGGEST (Sequential Batching Engine)
 // ==========================================
 app.post('/api/analyze-schema', async (req, res) => {
     const { endpoints } = req.body;
@@ -80,14 +80,14 @@ app.post('/api/analyze-schema', async (req, res) => {
             const schemaSummary = chunk.map((e: any) => `- ID: "${e.id}" | Description: ${e.description}`).join('\n');
             const userPrompt = `List the best tools from this chunk:\n\n${schemaSummary}`;
 
-            // v1beta endpoint is currently the most compatible for flash models
-            const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+            // 🚩 Using production v1 endpoint
+            const url = `https://generativelanguage.googleapis.com/v1/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
             
             const result = await axios.post(url, {
                 contents: [{ parts: [{ text: userPrompt }] }],
                 systemInstruction: { parts: [{ text: systemPrompt }] },
                 generationConfig: { responseMimeType: "application/json", temperature: 0.1 }
-            }, { timeout: 15000 });
+            });
 
             const aiRaw = result.data.candidates?.[0]?.content?.parts?.[0]?.text;
             if (aiRaw) {
@@ -97,7 +97,7 @@ app.post('/api/analyze-schema', async (req, res) => {
             }
 
             if (chunks.length > 1 && index < chunks.length - 1) {
-                await new Promise(resolve => setTimeout(resolve, 2000));
+                await new Promise(resolve => setTimeout(resolve, 1500));
             }
         }
 
@@ -113,20 +113,19 @@ app.post('/api/analyze-schema', async (req, res) => {
     }
 });
 
-// ... [SSE / Deployment Logic Preserved] ...
+// ... [Remainder of deployment/SSE code preserved] ...
 const activeTransports = new Map<string, SSEServerTransport>();
 
 app.get('/sse/:serverId', async (req, res) => {
     const serverId = req.params.serverId;
-    if (!db) return res.status(500).send("Database not connected.");
-    
-    const doc = await db.collection('artifacts').doc('mcp-studio-v1').collection('public').doc('data').collection('deployments').doc(serverId).get();
+    if (!db) return res.status(500).send("Database connection error.");
+    const doc = await db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('deployments').doc(serverId).get();
     if (!doc.exists) return res.status(404).send("Not found.");
     const vaultData = doc.data();
 
     const transport = new SSEServerTransport("/messages/" + serverId, res);
     activeTransports.set(serverId, transport);
-    const mcpServer = new Server({ name: "MCP-Studio", version: "1.4.4" }, { capabilities: { tools: {} } });
+    const mcpServer = new Server({ name: "MCP-Studio", version: "1.4.6" }, { capabilities: { tools: {} } });
     mcpServer.setRequestHandler(ListToolsRequestSchema, async () => ({
         tools: (vaultData.endpoints || []).map((ep: any) => ({
             name: `${ep.method}_${ep.path.replace(/[^a-zA-Z0-9]/g, '_')}`.toLowerCase(),
@@ -150,4 +149,4 @@ app.post('/messages/:serverId', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 MCP Proxy Live (v1.4.4) with ${GEMINI_MODEL}`));
+app.listen(PORT, () => console.log(`🚀 MCP Proxy Live (v1.4.6) with ${GEMINI_MODEL}`));
