@@ -20,7 +20,7 @@ const stripeKey = process.env.STRIPE_SECRET_KEY;
 const stripe = new Stripe(stripeKey || 'sk_test_dummy', { apiVersion: '2023-10-16' });
 
 const GEMINI_API_KEY = (process.env.GEMINI_API_KEY || "").trim(); 
-const GEMINI_MODEL = "gemini-2.5-flash-preview-09-2025"; 
+const GEMINI_MODEL = "gemini-1.5-flash"; 
 const APP_ID = 'mcp-studio-v1';
 
 let db: any = null;
@@ -69,16 +69,18 @@ app.post('/api/analyze-schema', async (req, res) => {
         for (const [index, chunk] of chunks.entries()) {
             const schemaSummary = chunk.map((e: any) => `- ID: "${e.id}" | Description: ${e.description}`).join('\n');
             
-            const systemPrompt = "You are an AI Tool Architect. Suggest the 3-5 most useful endpoints from the provided list for an AI agent. Return valid JSON only.";
-            const userPrompt = `Return a JSON object with a "suggestions" array containing the best tool IDs from this list:\n\n${schemaSummary}`;
+            const userPrompt = `You are an AI Tool Architect. Suggest the 3-5 most useful endpoints from the provided list for an AI agent. 
+CRITICAL: Return ONLY a JSON object with a "suggestions" array.
+Format: {"suggestions": ["METHOD:PATH"]}
 
-            const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+Endpoints to analyze:
+${schemaSummary}`;
+
+            const url = `https://generativelanguage.googleapis.com/v1/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
             
             const result = await axios.post(url, {
                 contents: [{ parts: [{ text: userPrompt }] }],
-                systemInstruction: { parts: [{ text: systemPrompt }] },
                 generationConfig: { 
-                    responseMimeType: "application/json",
                     temperature: 0.1 
                 }
             });
