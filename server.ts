@@ -21,11 +21,11 @@ const stripe = new Stripe(stripeKey || 'sk_test_dummy', { apiVersion: '2023-10-1
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || ""; 
 /**
- * 🚩 COMPATIBILITY FIX: 
- * Using "gemini-1.5-flash" (no -latest suffix) for maximum compatibility 
- * with the v1beta endpoint.
+ * 🚩 MODEL UPGRADE: 
+ * Switching to "gemini-1.5-pro" to resolve the "model not found" 
+ * error occurring with the flash variant on the v1beta endpoint.
  */
-const GEMINI_MODEL = "gemini-1.5-flash"; 
+const GEMINI_MODEL = "gemini-1.5-pro"; 
 const APP_ID = 'mcp-studio-v1';
 
 let db: any = null;
