@@ -30,7 +30,7 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
-app.options('*', cors(corsOptions));
+app.options(/.*/, cors(corsOptions));
 
 // Middleware to parse JSON bodies
 app.use(express.json({ limit: '50mb' }));
