@@ -5,6 +5,7 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import axios from 'axios';
+import Stripe from 'stripe';
 import { initializeApp, cert, getApps } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
 
@@ -12,8 +13,12 @@ const app = express();
 app.use(cors());
 
 // ==========================================
-// 🚀 1. INITIALIZATION
+// 🚀 1. INITIALIZATION (Firestore & Gemini)
 // ==========================================
+const stripeKey = process.env.STRIPE_SECRET_KEY;
+// @ts-ignore - Ignoring API version string validation for stability
+const stripe = new Stripe(stripeKey || 'sk_test_dummy', { apiVersion: '2023-10-16' });
+
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || ""; 
 const GEMINI_MODEL = "gemini-1.5-flash"; 
 const APP_ID = 'mcp-studio-v1';
@@ -26,22 +31,28 @@ try {
             initializeApp({ credential: cert(serviceAccount) });
         }
         db = getFirestore();
+        
+        // 🚩 CRITICAL FIX for 500 Error: 
+        // Tells Firestore to ignore 'undefined' fields instead of crashing
         db.settings({ ignoreUndefinedProperties: true });
-        console.log("🔥 Firestore v1.3.0 Ready.");
+        
+        console.log("🔥 Firestore v1.3.1 Ready.");
     }
 } catch (e: any) { 
     console.error("❌ Firebase Init Failed:", e.message); 
 }
 
 // ==========================================
-// 📡 2. MIDDLEWARE
+// 📡 2. MIDDLEWARE & HELPERS
 // ==========================================
 
+// Custom middleware to route traffic safely
 app.use((req, res, next) => {
-    // Log incoming requests for debugging
     if (req.method === 'POST') console.log(`[REQ] ${req.path}`);
     
-    if (req.path.startsWith('/messages/')) {
+    // We skip JSON parsing for MCP message streams (to avoid "Stream not readable")
+    // AND we skip it for Stripe webhooks so Stripe can verify the raw signature.
+    if (req.path.startsWith('/messages/') || req.path === '/api/webhook/stripe') {
         next(); 
     } else {
         express.json()(req, res, next);
@@ -56,64 +67,89 @@ async function getDeployment(serverId: string) {
     } catch (e) { return null; }
 }
 
+app.get('/api/health', (req, res) => res.json({ status: "ok", version: "1.3.1", dbConnected: !!db }));
+
 // ==========================================
-// 📡 3. PUBLIC API ROUTES
+// 💳 3. STRIPE WEBHOOK
+// ==========================================
+app.post('/api/webhook/stripe', express.raw({ type: 'application/json' }), async (req, res) => {
+    const sig = req.headers['stripe-signature'];
+    const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+    
+    if (!sig || !webhookSecret) return res.status(400).send("Missing Stripe config");
+
+    try {
+        const event = stripe.webhooks.constructEvent(req.body, sig as string, webhookSecret);
+        if (event.type === 'checkout.session.completed') {
+            const session = event.data.object as any;
+            const userId = session.client_reference_id; 
+            if (userId && db) {
+                const userDocRef = db.collection('artifacts').doc(APP_ID).collection('users').doc(userId).collection('project').doc('current');
+                await userDocRef.set({ isPro: true }, { merge: true });
+                console.log(`✅ Webhook Success: User ${userId} upgraded to Pro.`);
+            }
+        }
+    } catch (err: any) { 
+        console.error("Webhook Error:", err.message);
+        return res.status(400).send(`Webhook Error: ${err.message}`); 
+    }
+    res.send();
+});
+
+// ==========================================
+// 📡 4. PUBLIC API ROUTES
 // ==========================================
 
 /**
- * 🪄 MAGIC SUGGEST (v1.3.0)
- * Fixed the ID mismatch and parsing issues.
+ * 🪄 MAGIC SUGGEST (v1.3.1)
+ * Optimized prompt to prevent ID hallucinations and strip extra characters.
  */
 app.post('/api/analyze-schema', async (req, res) => {
     const { endpoints } = req.body;
     
     if (!GEMINI_API_KEY) return res.status(500).json({ error: "Gemini Key missing." });
-    if (!endpoints || !Array.isArray(endpoints)) return res.status(400).json({ error: "Invalid endpoints." });
+    if (!endpoints || !Array.isArray(endpoints)) return res.status(400).json({ error: "Endpoints required." });
 
     try {
-        // We only send the first 100 to stay within token/time limits
-        const schemaSummary = endpoints.slice(0, 100).map((e: any) => `ID: "${e.id}" | Desc: ${e.description}`).join('\n');
+        // Send IDs wrapped in double quotes to the AI so it respects the exact format
+        const schemaSummary = endpoints.slice(0, 100).map((e: any) => `- ID: "${e.id}" | Description: ${e.description}`).join('\n');
         
-        const systemPrompt = `You are an API Expert. Suggest 5-10 most useful endpoints for an AI assistant.
-        CRITICAL: Your response must be valid JSON. 
-        CRITICAL: The IDs in your list MUST EXACTLY MATCH the IDs provided (case-sensitive, no extra spaces).
+        const systemPrompt = `You are an AI Tool Architect. Suggest the most useful API endpoints.
+        CRITICAL: You must return valid JSON. 
+        CRITICAL: The IDs you suggest MUST EXACTLY match the IDs in the provided list.
+        Include the exact Method and Path as they appear in the ID string.
         Format: {"suggestions": ["METHOD:PATH", "METHOD:PATH"]}`;
 
-        const userPrompt = `List of endpoints:\n${schemaSummary}`;
+        const userPrompt = `Choose the 5-10 best tools from this list. Return ONLY the IDs:\n\n${schemaSummary}`;
 
         const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
         
         const result = await axios.post(url, {
             contents: [{ parts: [{ text: userPrompt }] }],
             systemInstruction: { parts: [{ text: systemPrompt }] },
-            generationConfig: { 
-                responseMimeType: "application/json", 
-                temperature: 0.1 
-            }
+            generationConfig: { responseMimeType: "application/json", temperature: 0.1 }
         }, { timeout: 15000 });
         
         const aiRaw = result.data.candidates?.[0]?.content?.parts?.[0]?.text;
-        
-        if (!aiRaw) {
-            return res.json({ suggestions: [], error: "AI returned no content" });
-        }
+        if (!aiRaw) return res.json({ suggestions: [], error: "AI returned no content" });
 
-        // Parse the AI response. Since we use responseMimeType: "application/json", 
-        // the AI response is usually a clean JSON string.
         try {
             const parsed = JSON.parse(aiRaw);
-            console.log(`[AI] Successfully suggested ${parsed.suggestions?.length || 0} tools.`);
-            res.json(parsed);
+            // Clean up the output string to ensure it exactly matches the frontend
+            const suggestions = (parsed.suggestions || []).map((s: string) => s.replace(/"/g, '').trim());
+            console.log(`[AI] Successfully suggested ${suggestions.length} tools.`);
+            res.json({ suggestions });
         } catch (innerParseErr) {
-            // Fallback for older models or unexpected chatter
+            // Fallback for messy AI responses
             const jsonMatch = aiRaw.match(/\{[\s\S]*\}/);
             if (jsonMatch) {
-                res.json(JSON.parse(jsonMatch[0]));
+                const parsed = JSON.parse(jsonMatch[0]);
+                const suggestions = (parsed.suggestions || []).map((s: string) => s.replace(/"/g, '').trim());
+                res.json({ suggestions });
             } else {
                 throw new Error("Could not parse AI response as JSON");
             }
         }
-
     } catch (error: any) {
         console.error("Magic Suggest Error:", error.message);
         res.json({ suggestions: [], error: "AI analysis timed out or failed." });
@@ -126,40 +162,45 @@ app.post('/api/analyze-schema', async (req, res) => {
 app.post('/api/deploy', async (req, res) => {
     try {
         const { apiKey, endpoints, baseUrl, piiMasking } = req.body;
+        if (!baseUrl) return res.status(400).json({ error: "Base URL missing." });
+
         const serverId = uuidv4();
         const config = {
-            apiKey: apiKey || 'no-key',
+            apiKey: apiKey || 'no-key-provided',
             endpoints: endpoints || [],
-            baseUrl: baseUrl?.trim() || '',
+            baseUrl: baseUrl.trim(),
             piiMasking: !!piiMasking,
             createdAt: new Date().toISOString()
         };
         
         if (db) {
             await db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('deployments').doc(serverId).set(config);
+            console.log(`[Vault] Deployed server config for: ${serverId}`);
         }
 
         const publicUrl = process.env.RENDER_EXTERNAL_URL || `https://${req.get('host')}`;
         res.json({ success: true, sseUrl: `${publicUrl}/sse/${serverId}` });
     } catch (err: any) {
+        console.error("Deploy Error:", err.message);
         res.status(500).json({ error: "Deploy Error", details: err.message });
     }
 });
 
 // ==========================================
-// 📡 4. MCP SSE SERVER LOGIC
+// 📡 5. MCP SSE SERVER LOGIC
 // ==========================================
 const activeTransports = new Map<string, SSEServerTransport>();
 
 app.get('/sse/:serverId', async (req, res) => {
     const serverId = req.params.serverId;
     const vaultData = await getDeployment(serverId);
-    if (!vaultData) return res.status(404).send("Deployment not found.");
+    
+    if (!vaultData) return res.status(404).send("Deployment not found. Please re-deploy from MCP Studio.");
 
     const transport = new SSEServerTransport("/messages/" + serverId, res);
     activeTransports.set(serverId, transport);
 
-    const mcpServer = new Server({ name: "MCP-Studio-Proxy", version: "1.3.0" }, { capabilities: { tools: {} } });
+    const mcpServer = new Server({ name: "MCP-Studio-Proxy", version: "1.3.1" }, { capabilities: { tools: {} } });
 
     mcpServer.setRequestHandler(ListToolsRequestSchema, async () => ({
         tools: (vaultData.endpoints || []).map((ep: any) => ({
@@ -193,7 +234,8 @@ app.get('/sse/:serverId', async (req, res) => {
     await mcpServer.connect(transport);
 });
 
-app.post('/sse/:serverId', (req, res) => res.status(200).json({ status: "ready" }));
+// Explicitly handle Cursor's POST probe to force it to use standard SSE
+app.post('/sse/:serverId', (req, res) => res.status(200).json({ status: "Use GET for SSE" }));
 
 app.post('/messages/:serverId', async (req, res) => {
     const transport = activeTransports.get(req.params.serverId);
@@ -202,4 +244,4 @@ app.post('/messages/:serverId', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 MCP Proxy v1.3.0 Live on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 MCP Proxy v1.3.1 Live on port ${PORT}`));
