@@ -19,8 +19,13 @@ const stripeKey = process.env.STRIPE_SECRET_KEY;
 // @ts-ignore
 const stripe = new Stripe(stripeKey || 'sk_test_dummy', { apiVersion: '2023-10-16' });
 
+/**
+ * 🚩 MODEL SWITCH: 
+ * Switching to "gemini-2.5-flash-preview-09-2025" (or gemini-2.5-flash) 
+ * to bypass the current zero-quota restrictions on the 2.0 version.
+ */
 const GEMINI_API_KEY = (process.env.GEMINI_API_KEY || "").trim(); 
-const GEMINI_MODEL = "gemini-2.0-flash"; 
+const GEMINI_MODEL = "gemini-2.5-flash-preview-09-2025"; 
 const APP_ID = 'mcp-studio-v1';
 
 let db: any = null;
@@ -48,7 +53,7 @@ app.use((req, res, next) => {
 });
 
 // ==========================================
-// 🪄 MAGIC SUGGEST (With Quota-Aware Batching)
+// 🪄 MAGIC SUGGEST (With Quota-Aware Batching & New Model)
 // ==========================================
 app.post('/api/analyze-schema', async (req, res) => {
     const { endpoints } = req.body;
@@ -58,8 +63,6 @@ app.post('/api/analyze-schema', async (req, res) => {
     console.log(`[Magic] Analyzing ${endpoints.length} endpoints via ${GEMINI_MODEL}...`);
 
     try {
-        // --- 🚩 STEP 1: CHUNKING LOGIC ---
-        // We split the endpoints into batches of 20 to avoid hitting TPM (Token) limits
         const CHUNK_SIZE = 20;
         const chunks = [];
         for (let i = 0; i < endpoints.length; i += CHUNK_SIZE) {
@@ -70,7 +73,6 @@ app.post('/api/analyze-schema', async (req, res) => {
         const systemPrompt = `You are an AI Tool Architect. Suggest the 3-5 most useful endpoints from the provided list for an AI agent.
         CRITICAL: Return valid JSON. Format: {"suggestions": ["METHOD:PATH"]}`;
 
-        // --- 🚩 STEP 2: SEQUENTIAL PROCESSING WITH DELAY ---
         for (const [index, chunk] of chunks.entries()) {
             console.log(`[Magic] Processing batch ${index + 1}/${chunks.length}...`);
             
@@ -92,13 +94,11 @@ app.post('/api/analyze-schema', async (req, res) => {
                 allSuggestions = [...allSuggestions, ...batchSuggestions];
             }
 
-            // Small delay to prevent hitting RPM (Request) limits
             if (chunks.length > 1 && index < chunks.length - 1) {
                 await new Promise(resolve => setTimeout(resolve, 2000));
             }
         }
 
-        // Final verification against original IDs
         const validIds = endpoints.map((e: any) => e.id);
         const matched = allSuggestions.filter((s: string) => validIds.includes(s));
         
@@ -140,7 +140,7 @@ app.get('/sse/:serverId', async (req, res) => {
     if (!vaultData) return res.status(404).send("Not found.");
     const transport = new SSEServerTransport("/messages/" + serverId, res);
     activeTransports.set(serverId, transport);
-    const mcpServer = new Server({ name: "MCP-Studio", version: "1.3.7" }, { capabilities: { tools: {} } });
+    const mcpServer = new Server({ name: "MCP-Studio", version: "1.3.8" }, { capabilities: { tools: {} } });
     mcpServer.setRequestHandler(ListToolsRequestSchema, async () => ({
         tools: (vaultData.endpoints || []).map((ep: any) => ({
             name: `${ep.method}_${ep.path.replace(/[^a-zA-Z0-9]/g, '_')}`.toLowerCase(),
@@ -163,4 +163,4 @@ app.post('/messages/:serverId', async (req, res) => {
     if (transport) await transport.handlePostMessage(req, res);
 });
 
-app.listen(process.env.PORT || 3000, () => console.log(`🚀 MCP Proxy Live (v1.3.7) with Batching`));
+app.listen(process.env.PORT || 3000, () => console.log(`🚀 MCP Proxy Live (v1.3.8) with ${GEMINI_MODEL}`));
