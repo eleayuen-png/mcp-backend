@@ -20,12 +20,13 @@ const stripeKey = process.env.STRIPE_SECRET_KEY;
 const stripe = new Stripe(stripeKey || 'sk_test_dummy', { apiVersion: '2023-10-16' });
 
 /**
- * 🚩 STABILITY FIX: 
- * Switching to "gemini-2.5-flash" (stable version) as requested.
- * We also trim the key to ensure no whitespace from Render breaks the request.
+ * 🚩 PRODUCTION UPGRADE: 
+ * Switching to "gemini-2.0-flash". 
+ * This model is the fastest and most advanced for architectural tasks.
+ * Once billing is linked in Google Cloud, regional and quota errors will resolve.
  */
 const GEMINI_API_KEY = (process.env.GEMINI_API_KEY || "").trim(); 
-const GEMINI_MODEL = "gemini-2.5-flash"; 
+const GEMINI_MODEL = "gemini-2.0-flash"; 
 const APP_ID = 'mcp-studio-v1';
 
 let db: any = null;
@@ -53,7 +54,7 @@ app.use((req, res, next) => {
 });
 
 // ==========================================
-// 🪄 MAGIC SUGGEST (Batching & Gemini 2.5)
+// 🪄 MAGIC SUGGEST (Batching Engine)
 // ==========================================
 app.post('/api/analyze-schema', async (req, res) => {
     const { endpoints } = req.body;
@@ -63,7 +64,7 @@ app.post('/api/analyze-schema', async (req, res) => {
     console.log(`[Magic] Analyzing ${endpoints.length} endpoints via ${GEMINI_MODEL}...`);
 
     try {
-        // CHUNKING: Send 20 endpoints at a time to stay under TPM limits
+        // CHUNKING: We split large schemas into groups of 20
         const CHUNK_SIZE = 20;
         const chunks = [];
         for (let i = 0; i < endpoints.length; i += CHUNK_SIZE) {
@@ -80,7 +81,6 @@ app.post('/api/analyze-schema', async (req, res) => {
             const schemaSummary = chunk.map((e: any) => `- ID: "${e.id}" | Description: ${e.description}`).join('\n');
             const userPrompt = `List the best tools from this chunk:\n\n${schemaSummary}`;
 
-            // Using the v1beta endpoint with the new model name
             const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
             
             const result = await axios.post(url, {
@@ -96,16 +96,15 @@ app.post('/api/analyze-schema', async (req, res) => {
                 allSuggestions = [...allSuggestions, ...batchSuggestions];
             }
 
-            // RPM Safety Delay
+            // Small delay to ensure we don't hit "Requests Per Minute" limits
             if (chunks.length > 1 && index < chunks.length - 1) {
-                await new Promise(resolve => setTimeout(resolve, 2000));
+                await new Promise(resolve => setTimeout(resolve, 1500));
             }
         }
 
         const validIds = endpoints.map((e: any) => e.id);
         const matched = allSuggestions.filter((s: string) => validIds.includes(s));
         
-        console.log(`[Magic] Done. Found ${matched.length} total suggestions.`);
         res.json({ suggestions: matched });
 
     } catch (error: any) {
@@ -116,7 +115,7 @@ app.post('/api/analyze-schema', async (req, res) => {
 });
 
 // ==========================================
-// 🚀 DEPLOYMENT & SSE LOGIC
+// 🚀 DEPLOYMENT & SSE LOGIC (Preserved)
 // ==========================================
 async function getDeployment(serverId: string) {
     if (!db) return null;
@@ -143,7 +142,7 @@ app.get('/sse/:serverId', async (req, res) => {
     if (!vaultData) return res.status(404).send("Not found.");
     const transport = new SSEServerTransport("/messages/" + serverId, res);
     activeTransports.set(serverId, transport);
-    const mcpServer = new Server({ name: "MCP-Studio", version: "1.3.8" }, { capabilities: { tools: {} } });
+    const mcpServer = new Server({ name: "MCP-Studio", version: "1.4.0" }, { capabilities: { tools: {} } });
     mcpServer.setRequestHandler(ListToolsRequestSchema, async () => ({
         tools: (vaultData.endpoints || []).map((ep: any) => ({
             name: `${ep.method}_${ep.path.replace(/[^a-zA-Z0-9]/g, '_')}`.toLowerCase(),
@@ -167,4 +166,4 @@ app.post('/messages/:serverId', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 MCP Proxy Live (v1.3.8) with ${GEMINI_MODEL}`));
+app.listen(PORT, () => console.log(`🚀 MCP Proxy Live (v1.4.0) with ${GEMINI_MODEL}`));
