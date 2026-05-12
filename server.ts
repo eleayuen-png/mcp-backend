@@ -12,15 +12,28 @@ import { getFirestore } from 'firebase-admin/firestore';
 const app = express();
 
 // ==========================================
-// 🚀 CORS FIX FOR GITHUB PAGES
+// 🕵️ DEBUG LOGGING & BULLETPROOF CORS
 // ==========================================
-// This explicitly tells the browser that your frontend is allowed to talk to this backend
-app.use(cors({
-    origin: '*', // Allows all domains to connect
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'Accept']
-}));
-app.options(/.*/, cors()); // Forces Express to respond correctly to Pre-flight checks
+// 1. The Spy: Log every single request so we can see it in Render's dashboard
+app.use((req, res, next) => {
+    console.log(`[NETWORK] ${req.method} request to ${req.path} from Origin: ${req.headers.origin || 'Unknown'}`);
+    next();
+});
+
+// 2. Manual, forceful CORS headers to guarantee the browser accepts it
+app.use((req, res, next) => {
+    const origin = req.headers.origin || '*';
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept');
+    
+    // If this is the bouncer's preflight check (OPTIONS), approve it immediately and stop
+    if (req.method === 'OPTIONS') {
+        console.log(`[CORS] Preflight check approved for ${req.path}`);
+        return res.status(200).end();
+    }
+    next();
+});
 
 // ==========================================
 // 1. INITIALIZATION
@@ -49,11 +62,12 @@ try {
 // 📡 2. MIDDLEWARE
 // ==========================================
 app.use((req, res, next) => {
-    if (req.method === 'POST') console.log(`[REQ] ${req.path}`);
     if (req.path.startsWith('/messages/') || req.path === '/api/webhook/stripe') {
         next(); 
     } else {
-        express.json()(req, res, next);
+        // 🚩 FIX: Increased limit to 50mb. Big Swagger files cause 413 Payload Too Large errors
+        // which crash the request before the server can reply, causing a fake CORS error!
+        express.json({ limit: '50mb' })(req, res, next);
     }
 });
 
