@@ -20,7 +20,7 @@ app.use(cors({
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'Accept']
 }));
-app.options('*', cors()); // Forces Express to respond correctly to Pre-flight checks
+app.options(/.*/, cors()); // Forces Express to respond correctly to Pre-flight checks
 
 // ==========================================
 // 1. INITIALIZATION
