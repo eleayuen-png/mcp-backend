@@ -167,8 +167,12 @@ app.post('/api/analyze-schema', async (req, res) => {
         res.json({ suggestions, matched, unmatched });
 
     } catch (error: any) {
-        console.error("[Diagnostic] Magic Suggest Error:", error.message);
-        res.json({ suggestions: [], error: "AI analysis timed out or failed." });
+        // 🚩 FIX: Extract the REAL reason Gemini failed (e.g. "API Key not valid") 
+        const realErrorReason = error.response?.data?.error?.message || error.message || "Unknown AI Error";
+        console.error("[Diagnostic] Magic Suggest Error:", realErrorReason);
+        
+        // Return a 500 error status so the frontend explicitly knows it failed, with the real reason.
+        res.status(500).json({ suggestions: [], error: `Gemini API Error: ${realErrorReason}` });
     }
 });
 
