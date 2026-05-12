@@ -12,31 +12,31 @@ import { getFirestore } from 'firebase-admin/firestore';
 const app = express();
 
 // ==========================================
-// 🕵️ DEBUG LOGGING & BULLETPROOF CORS
+// 🛡️ 1. BULLETPROOF CORS (Using the official package)
 // ==========================================
-// 1. The Spy: Log every single request so we can see it in Render's dashboard
-app.use((req, res, next) => {
-    console.log(`[NETWORK] ${req.method} request to ${req.path} from Origin: ${req.headers.origin || 'Unknown'}`);
-    next();
-});
+app.use(cors({
+    origin: '*', // Allow ALL origins (GitHub Pages)
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'Accept']
+}));
 
-// 2. Manual, forceful CORS headers to guarantee the browser accepts it
+// ==========================================
+// 🕵️ 2. THE SPY (Logging)
+// ==========================================
 app.use((req, res, next) => {
-    const origin = req.headers.origin || '*';
-    res.setHeader('Access-Control-Allow-Origin', origin);
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept');
-    
-    // If this is the bouncer's preflight check (OPTIONS), approve it immediately and stop
-    if (req.method === 'OPTIONS') {
-        console.log(`[CORS] Preflight check approved for ${req.path}`);
-        return res.status(200).end();
-    }
+    console.log(`[NETWORK SPY] ${req.method} request to ${req.path}`);
     next();
 });
 
 // ==========================================
-// 1. INITIALIZATION
+// 🏥 3. THE HEALTH CHECK (Crucial for Debugging)
+// ==========================================
+app.get('/health', (req, res) => {
+    res.status(200).send("🚀 MCP BACKEND IS ALIVE AND THE NEW CODE IS RUNNING!");
+});
+
+// ==========================================
+// 4. INITIALIZATION
 // ==========================================
 const stripeKey = process.env.STRIPE_SECRET_KEY;
 // @ts-ignore
@@ -59,14 +59,12 @@ try {
 } catch (e: any) { console.error("❌ Firebase Init Failed:", e.message); }
 
 // ==========================================
-// 📡 2. MIDDLEWARE
+// 📡 5. MIDDLEWARE
 // ==========================================
 app.use((req, res, next) => {
     if (req.path.startsWith('/messages/') || req.path === '/api/webhook/stripe') {
         next(); 
     } else {
-        // 🚩 FIX: Increased limit to 50mb. Big Swagger files cause 413 Payload Too Large errors
-        // which crash the request before the server can reply, causing a fake CORS error!
         express.json({ limit: '50mb' })(req, res, next);
     }
 });
@@ -112,7 +110,6 @@ ${schemaSummary}`;
             const aiRaw = result.data.candidates?.[0]?.content?.parts?.[0]?.text || "";
             
             if (aiRaw) {
-                // Strip markdown code blocks in case the AI includes them anyway
                 const cleanJson = aiRaw.replace(/```json/g, "").replace(/```/g, "").trim();
                 try {
                     const parsed = JSON.parse(cleanJson);
@@ -141,7 +138,7 @@ ${schemaSummary}`;
 });
 
 // ==========================================
-// 🚀 DEPLOYMENT & SSE (Preserved)
+// 🚀 DEPLOYMENT & SSE
 // ==========================================
 app.post('/api/deploy', async (req, res) => {
     try {
@@ -165,7 +162,7 @@ app.get('/sse/:serverId', async (req, res) => {
 
     const transport = new SSEServerTransport("/messages/" + serverId, res);
     activeTransports.set(serverId, transport);
-    const mcpServer = new Server({ name: "MCP-Studio", version: "1.5.2" }, { capabilities: { tools: {} } });
+    const mcpServer = new Server({ name: "MCP-Studio", version: "1.5.4" }, { capabilities: { tools: {} } });
     
     mcpServer.setRequestHandler(ListToolsRequestSchema, async () => ({
         tools: (vaultData.endpoints || []).map((ep: any) => ({
@@ -192,10 +189,6 @@ app.post('/messages/:serverId', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-
-// 🚩 CRITICAL FIX: We added '0.0.0.0' here. 
-// In Docker/Render, this explicitly tells the server to accept traffic from the outside internet, 
-// not just from inside its own container. Without this, Render blocks the traffic before it reaches your code!
 app.listen(PORT as number, '0.0.0.0', () => {
-    console.log(`🚀 MCP Proxy Live (v1.5.3) on port ${PORT} with ${GEMINI_MODEL}`);
+    console.log(`🚀 MCP Proxy Live (v1.5.4) on port ${PORT} with ${GEMINI_MODEL}`);
 });
