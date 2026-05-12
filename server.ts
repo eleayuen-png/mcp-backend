@@ -20,8 +20,7 @@ const stripeKey = process.env.STRIPE_SECRET_KEY;
 const stripe = new Stripe(stripeKey || 'sk_test_dummy', { apiVersion: '2023-10-16' });
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || ""; 
-// 🚩 CRITICAL FIX: Using the universally available public model for Render
-const GEMINI_MODEL = "gemini-1.5-flash"; 
+const GEMINI_MODEL = "gemini-2.0-flash"; 
 const APP_ID = 'mcp-studio-v1';
 
 let db: any = null;
