@@ -27,17 +27,23 @@ try {
         }
         db = getFirestore();
         db.settings({ ignoreUndefinedProperties: true });
-        console.log("🔥 Firestore v1.2.8 Ready.");
+        console.log("🔥 Firestore v1.2.9 Ready.");
     }
 } catch (e: any) { 
     console.error("❌ Firebase Init Failed:", e.message); 
 }
 
 // ==========================================
-// 📡 2. MIDDLEWARE & HELPERS
+// 📡 2. MIDDLEWARE & LOGGING
 // ==========================================
 
-// Handle JSON but skip for MCP message streams to avoid "Stream not readable"
+// Global Logger to help debug 404s in Render dashboard
+app.use((req, res, next) => {
+    console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
+    next();
+});
+
+// Handle JSON but skip for MCP message streams
 app.use((req, res, next) => {
     if (req.path.startsWith('/messages/')) {
         next(); 
@@ -54,8 +60,8 @@ async function getDeployment(serverId: string) {
     } catch (e) { return null; }
 }
 
-// Health check to verify version
-app.get('/api/health', (req, res) => res.json({ status: "ok", version: "1.2.8", dbConnected: !!db }));
+// Health check
+app.get('/api/health', (req, res) => res.json({ status: "ok", version: "1.2.9" }));
 
 // ==========================================
 // 📡 3. PUBLIC API ROUTES
@@ -63,37 +69,45 @@ app.get('/api/health', (req, res) => res.json({ status: "ok", version: "1.2.8", 
 
 /**
  * 🪄 MAGIC SUGGEST
- * Improved with aggressive JSON cleaning logic to prevent 500 crashes.
+ * v1.2.9: Added ultimate fallback logic to prevent 500 crashes
  */
 app.post('/api/analyze-schema', async (req, res) => {
-    console.log("[AI] Analyzing schema...");
     const { endpoints } = req.body;
     
-    if (!GEMINI_API_KEY) return res.status(500).json({ error: "Gemini Key missing on Render." });
-    if (!endpoints) return res.status(400).json({ error: "Endpoints required." });
+    if (!GEMINI_API_KEY) return res.status(500).json({ error: "Gemini Key missing." });
+    if (!endpoints || !Array.isArray(endpoints)) return res.status(400).json({ error: "Invalid endpoints." });
 
     try {
-        const schemaSummary = endpoints.map((e: any) => `- ID: ${e.id}\n  Desc: ${e.description}`).join('\n');
-        const systemPrompt = `Analyze the API list and suggest the top 5-10 most 'agentic' ones. Return ONLY JSON in this format: {"suggestions": ["ID1", "ID2"]}. Do not include markdown code blocks or any other text.`;
-        const userPrompt = `Suggest tools from this list:\n\n${schemaSummary}`;
+        const schemaSummary = endpoints.slice(0, 50).map((e: any) => `- ID: ${e.id}\n  Desc: ${e.description}`).join('\n');
+        const systemPrompt = `Analyze the API list and suggest the top 5-10 most 'agentic' ones. Return ONLY a JSON object: {"suggestions": ["ID1", "ID2"]}`;
+        const userPrompt = `Suggest tools:\n\n${schemaSummary}`;
 
         const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+        
         const result = await axios.post(url, {
             contents: [{ parts: [{ text: userPrompt }] }],
             systemInstruction: { parts: [{ text: systemPrompt }] },
             generationConfig: { responseMimeType: "application/json", temperature: 0.1 }
-        });
+        }, { timeout: 10000 }); // 10s timeout
         
         const aiRaw = result.data.candidates?.[0]?.content?.parts?.[0]?.text || '{"suggestions":[]}';
         
-        // 🚩 AGGRESSIVE CLEANING: Strip everything except the JSON content
-        const jsonMatch = aiRaw.match(/\{[\s\S]*\}/);
-        const cleaned = jsonMatch ? jsonMatch[0] : aiRaw;
-        
-        res.json(JSON.parse(cleaned));
+        // 🚩 BULLETPROOF PARSING
+        try {
+            // Try matching anything between curly braces first
+            const jsonMatch = aiRaw.match(/\{[\s\S]*\}/);
+            const cleaned = jsonMatch ? jsonMatch[0] : aiRaw;
+            const parsed = JSON.parse(cleaned);
+            res.json(parsed);
+        } catch (parseErr) {
+            console.warn("[AI] Parse failed, returning empty suggestions:", aiRaw);
+            res.json({ suggestions: [], warning: "AI response was unparseable" });
+        }
+
     } catch (error: any) {
         console.error("AI Analysis Error:", error.message);
-        res.status(500).json({ error: "AI failed to respond or returned invalid data.", details: error.message });
+        // 🚩 NEVER return a 500 here if we can avoid it. Return empty suggestions instead.
+        res.json({ suggestions: [], error: "AI service currently unavailable" });
     }
 });
 
@@ -103,13 +117,11 @@ app.post('/api/analyze-schema', async (req, res) => {
 app.post('/api/deploy', async (req, res) => {
     try {
         const { apiKey, endpoints, baseUrl, piiMasking } = req.body;
-        if (!baseUrl) return res.status(400).json({ error: "Base URL missing." });
-
         const serverId = uuidv4();
         const config = {
-            apiKey: apiKey || 'no-key-provided',
+            apiKey: apiKey || 'no-key',
             endpoints: endpoints || [],
-            baseUrl: baseUrl.trim(),
+            baseUrl: baseUrl?.trim() || '',
             piiMasking: !!piiMasking,
             createdAt: new Date().toISOString()
         };
@@ -133,18 +145,17 @@ const activeTransports = new Map<string, SSEServerTransport>();
 app.get('/sse/:serverId', async (req, res) => {
     const serverId = req.params.serverId;
     const vaultData = await getDeployment(serverId);
-    
     if (!vaultData) return res.status(404).send("Deployment not found.");
 
     const transport = new SSEServerTransport("/messages/" + serverId, res);
     activeTransports.set(serverId, transport);
 
-    const mcpServer = new Server({ name: "MCP-Studio-Proxy", version: "1.2.8" }, { capabilities: { tools: {} } });
+    const mcpServer = new Server({ name: "MCP-Studio-Proxy", version: "1.2.9" }, { capabilities: { tools: {} } });
 
     mcpServer.setRequestHandler(ListToolsRequestSchema, async () => ({
         tools: (vaultData.endpoints || []).map((ep: any) => ({
             name: `${ep.method}_${ep.path.replace(/[^a-zA-Z0-9]/g, '_')}`.toLowerCase(),
-            description: ep.description || `Call ${ep.method} ${ep.path}`,
+            description: ep.description || `Execute ${ep.method} on ${ep.path}`,
             inputSchema: { type: "object", properties: { params: { type: "object" }, body: { type: "object" } } }
         }))
     }));
@@ -173,14 +184,7 @@ app.get('/sse/:serverId', async (req, res) => {
     await mcpServer.connect(transport);
 });
 
-/**
- * 🚩 FIX: CURSOR POST PROBE
- * Returning 200 here prevents Cursor from seeing a "text/html" 404 page 
- * when it pokes the server.
- */
-app.post('/sse/:serverId', (req, res) => {
-    res.status(200).json({ status: "SSE connection point ready" });
-});
+app.post('/sse/:serverId', (req, res) => res.status(200).json({ status: "ready" }));
 
 app.post('/messages/:serverId', async (req, res) => {
     const transport = activeTransports.get(req.params.serverId);
@@ -189,4 +193,4 @@ app.post('/messages/:serverId', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 MCP Proxy v1.2.8 Live on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 MCP Proxy v1.2.9 Live on port ${PORT}`));
