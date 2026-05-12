@@ -27,24 +27,20 @@ try {
         }
         db = getFirestore();
         db.settings({ ignoreUndefinedProperties: true });
-        console.log("🔥 Firestore v1.2.9 Ready.");
+        console.log("🔥 Firestore v1.3.0 Ready.");
     }
 } catch (e: any) { 
     console.error("❌ Firebase Init Failed:", e.message); 
 }
 
 // ==========================================
-// 📡 2. MIDDLEWARE & LOGGING
+// 📡 2. MIDDLEWARE
 // ==========================================
 
-// Global Logger to help debug 404s in Render dashboard
 app.use((req, res, next) => {
-    console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
-    next();
-});
-
-// Handle JSON but skip for MCP message streams
-app.use((req, res, next) => {
+    // Log incoming requests for debugging
+    if (req.method === 'POST') console.log(`[REQ] ${req.path}`);
+    
     if (req.path.startsWith('/messages/')) {
         next(); 
     } else {
@@ -60,16 +56,13 @@ async function getDeployment(serverId: string) {
     } catch (e) { return null; }
 }
 
-// Health check
-app.get('/api/health', (req, res) => res.json({ status: "ok", version: "1.2.9" }));
-
 // ==========================================
 // 📡 3. PUBLIC API ROUTES
 // ==========================================
 
 /**
- * 🪄 MAGIC SUGGEST
- * v1.2.9: Added ultimate fallback logic to prevent 500 crashes
+ * 🪄 MAGIC SUGGEST (v1.3.0)
+ * Fixed the ID mismatch and parsing issues.
  */
 app.post('/api/analyze-schema', async (req, res) => {
     const { endpoints } = req.body;
@@ -78,36 +71,52 @@ app.post('/api/analyze-schema', async (req, res) => {
     if (!endpoints || !Array.isArray(endpoints)) return res.status(400).json({ error: "Invalid endpoints." });
 
     try {
-        const schemaSummary = endpoints.slice(0, 50).map((e: any) => `- ID: ${e.id}\n  Desc: ${e.description}`).join('\n');
-        const systemPrompt = `Analyze the API list and suggest the top 5-10 most 'agentic' ones. Return ONLY a JSON object: {"suggestions": ["ID1", "ID2"]}`;
-        const userPrompt = `Suggest tools:\n\n${schemaSummary}`;
+        // We only send the first 100 to stay within token/time limits
+        const schemaSummary = endpoints.slice(0, 100).map((e: any) => `ID: "${e.id}" | Desc: ${e.description}`).join('\n');
+        
+        const systemPrompt = `You are an API Expert. Suggest 5-10 most useful endpoints for an AI assistant.
+        CRITICAL: Your response must be valid JSON. 
+        CRITICAL: The IDs in your list MUST EXACTLY MATCH the IDs provided (case-sensitive, no extra spaces).
+        Format: {"suggestions": ["METHOD:PATH", "METHOD:PATH"]}`;
+
+        const userPrompt = `List of endpoints:\n${schemaSummary}`;
 
         const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
         
         const result = await axios.post(url, {
             contents: [{ parts: [{ text: userPrompt }] }],
             systemInstruction: { parts: [{ text: systemPrompt }] },
-            generationConfig: { responseMimeType: "application/json", temperature: 0.1 }
-        }, { timeout: 10000 }); // 10s timeout
+            generationConfig: { 
+                responseMimeType: "application/json", 
+                temperature: 0.1 
+            }
+        }, { timeout: 15000 });
         
-        const aiRaw = result.data.candidates?.[0]?.content?.parts?.[0]?.text || '{"suggestions":[]}';
+        const aiRaw = result.data.candidates?.[0]?.content?.parts?.[0]?.text;
         
-        // 🚩 BULLETPROOF PARSING
+        if (!aiRaw) {
+            return res.json({ suggestions: [], error: "AI returned no content" });
+        }
+
+        // Parse the AI response. Since we use responseMimeType: "application/json", 
+        // the AI response is usually a clean JSON string.
         try {
-            // Try matching anything between curly braces first
-            const jsonMatch = aiRaw.match(/\{[\s\S]*\}/);
-            const cleaned = jsonMatch ? jsonMatch[0] : aiRaw;
-            const parsed = JSON.parse(cleaned);
+            const parsed = JSON.parse(aiRaw);
+            console.log(`[AI] Successfully suggested ${parsed.suggestions?.length || 0} tools.`);
             res.json(parsed);
-        } catch (parseErr) {
-            console.warn("[AI] Parse failed, returning empty suggestions:", aiRaw);
-            res.json({ suggestions: [], warning: "AI response was unparseable" });
+        } catch (innerParseErr) {
+            // Fallback for older models or unexpected chatter
+            const jsonMatch = aiRaw.match(/\{[\s\S]*\}/);
+            if (jsonMatch) {
+                res.json(JSON.parse(jsonMatch[0]));
+            } else {
+                throw new Error("Could not parse AI response as JSON");
+            }
         }
 
     } catch (error: any) {
-        console.error("AI Analysis Error:", error.message);
-        // 🚩 NEVER return a 500 here if we can avoid it. Return empty suggestions instead.
-        res.json({ suggestions: [], error: "AI service currently unavailable" });
+        console.error("Magic Suggest Error:", error.message);
+        res.json({ suggestions: [], error: "AI analysis timed out or failed." });
     }
 });
 
@@ -150,12 +159,12 @@ app.get('/sse/:serverId', async (req, res) => {
     const transport = new SSEServerTransport("/messages/" + serverId, res);
     activeTransports.set(serverId, transport);
 
-    const mcpServer = new Server({ name: "MCP-Studio-Proxy", version: "1.2.9" }, { capabilities: { tools: {} } });
+    const mcpServer = new Server({ name: "MCP-Studio-Proxy", version: "1.3.0" }, { capabilities: { tools: {} } });
 
     mcpServer.setRequestHandler(ListToolsRequestSchema, async () => ({
         tools: (vaultData.endpoints || []).map((ep: any) => ({
             name: `${ep.method}_${ep.path.replace(/[^a-zA-Z0-9]/g, '_')}`.toLowerCase(),
-            description: ep.description || `Execute ${ep.method} on ${ep.path}`,
+            description: ep.description || `Call ${ep.method} ${ep.path}`,
             inputSchema: { type: "object", properties: { params: { type: "object" }, body: { type: "object" } } }
         }))
     }));
@@ -193,4 +202,4 @@ app.post('/messages/:serverId', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 MCP Proxy v1.2.9 Live on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 MCP Proxy v1.3.0 Live on port ${PORT}`));
