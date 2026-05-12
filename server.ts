@@ -20,7 +20,8 @@ const stripeKey = process.env.STRIPE_SECRET_KEY;
 const stripe = new Stripe(stripeKey || 'sk_test_dummy', { apiVersion: '2023-10-16' });
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || ""; 
-const GEMINI_MODEL = "gemini-2.0-flash"; 
+// 🚩 CRITICAL FIX: Using the universally available public model for Render
+const GEMINI_MODEL = "gemini-1.5-flash"; 
 const APP_ID = 'mcp-studio-v1';
 
 let db: any = null;
@@ -32,7 +33,7 @@ try {
         }
         db = getFirestore();
         db.settings({ ignoreUndefinedProperties: true });
-        console.log("🔥 Firestore v1.3.2 Ready.");
+        console.log("🔥 Firestore v1.3.4 Ready.");
     }
 } catch (e: any) { 
     console.error("❌ Firebase Init Failed:", e.message); 
@@ -59,7 +60,7 @@ async function getDeployment(serverId: string) {
     } catch (e) { return null; }
 }
 
-app.get('/api/health', (req, res) => res.json({ status: "ok", version: "1.3.3", dbConnected: !!db }));
+app.get('/api/health', (req, res) => res.json({ status: "ok", version: "1.3.4", dbConnected: !!db }));
 
 // ==========================================
 // 💳 3. STRIPE WEBHOOK
@@ -93,7 +94,7 @@ app.post('/api/webhook/stripe', express.raw({ type: 'application/json' }), async
 // ==========================================
 
 /**
- * 🪄 MAGIC SUGGEST (v1.3.2 with DIAGNOSTIC LOGS)
+ * 🪄 MAGIC SUGGEST
  */
 app.post('/api/analyze-schema', async (req, res) => {
     console.log("========== MAGIC SUGGEST TRIGGERED ==========");
@@ -152,26 +153,21 @@ app.post('/api/analyze-schema', async (req, res) => {
 
         console.log(`[Diagnostic] Extracted Suggestions Array:`, suggestions);
 
-        // Verify matches
         const validIds = endpoints.map((e: any) => e.id);
         const matched = suggestions.filter((s: string) => validIds.includes(s));
         const unmatched = suggestions.filter((s: string) => !validIds.includes(s));
 
         console.log(`[Diagnostic] Valid Matches: ${matched.length}, Hallucinations: ${unmatched.length}`);
         if (unmatched.length > 0) {
-            console.warn(`[Diagnostic] Unmatched IDs from AI (These won't check boxes!):`, unmatched);
+            console.warn(`[Diagnostic] Unmatched IDs from AI:`, unmatched);
         }
 
         console.log("=============================================");
-        // We pass back `suggestions` but also the matches so the frontend console can see what happened
         res.json({ suggestions, matched, unmatched });
 
     } catch (error: any) {
-        // 🚩 FIX: Extract the REAL reason Gemini failed (e.g. "API Key not valid") 
         const realErrorReason = error.response?.data?.error?.message || error.message || "Unknown AI Error";
         console.error("[Diagnostic] Magic Suggest Error:", realErrorReason);
-        
-        // Return a 500 error status so the frontend explicitly knows it failed, with the real reason.
         res.status(500).json({ suggestions: [], error: `Gemini API Error: ${realErrorReason}` });
     }
 });
@@ -220,7 +216,7 @@ app.get('/sse/:serverId', async (req, res) => {
     const transport = new SSEServerTransport("/messages/" + serverId, res);
     activeTransports.set(serverId, transport);
 
-    const mcpServer = new Server({ name: "MCP-Studio-Proxy", version: "1.3.3" }, { capabilities: { tools: {} } });
+    const mcpServer = new Server({ name: "MCP-Studio-Proxy", version: "1.3.4" }, { capabilities: { tools: {} } });
 
     mcpServer.setRequestHandler(ListToolsRequestSchema, async () => ({
         tools: (vaultData.endpoints || []).map((ep: any) => ({
@@ -254,7 +250,6 @@ app.get('/sse/:serverId', async (req, res) => {
     await mcpServer.connect(transport);
 });
 
-// Explicitly handle Cursor's POST probe to force it to use standard SSE
 app.post('/sse/:serverId', (req, res) => res.status(200).json({ status: "Use GET for SSE" }));
 
 app.post('/messages/:serverId', async (req, res) => {
@@ -264,4 +259,4 @@ app.post('/messages/:serverId', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 MCP Proxy v1.3.3 Live on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 MCP Proxy v1.3.4 Live on port ${PORT}`));
