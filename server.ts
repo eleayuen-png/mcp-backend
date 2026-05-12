@@ -20,17 +20,27 @@ process.on('unhandledRejection', (reason, promise) => {
 const app = express();
 
 // ==========================================
-// 🌐 1. CORS CONFIGURATION
+// 🌐 1. CORS CONFIGURATION (BULLETPROOF)
 // ==========================================
-const corsOptions = {
-    origin: ['https://eleayuen-png.github.io', 'http://localhost:5173', 'http://localhost:3000'],
-    methods: ['GET', 'POST', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
-    credentials: true
-};
-
-app.use(cors(corsOptions));
-app.options(/.*/, cors(corsOptions));
+app.use((req, res, next) => {
+    const origin = req.headers.origin;
+    // Always echo back the exact origin that requested it (perfect for GitHub pages)
+    if (origin) {
+        res.setHeader('Access-Control-Allow-Origin', origin);
+    }
+    
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, PUT, DELETE');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    
+    // Intercept preflight OPTIONS request and return immediately
+    if (req.method === 'OPTIONS') {
+        res.status(204).end();
+        return;
+    }
+    
+    next();
+});
 
 // Middleware to parse JSON bodies
 app.use(express.json({ limit: '50mb' }));
