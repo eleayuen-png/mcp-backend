@@ -19,15 +19,8 @@ const stripeKey = process.env.STRIPE_SECRET_KEY;
 // @ts-ignore
 const stripe = new Stripe(stripeKey || 'sk_test_dummy', { apiVersion: '2023-10-16' });
 
-/**
- * 🚩 BILLED ACCOUNT STABILITY FIX (v1.4.8):
- * We are moving to the "v1" Production endpoint. 
- * Note: 'systemInstruction' and 'responseMimeType' are NOT supported on the v1 
- * endpoint JSON schema. We will wrap our instructions directly into the 
- * user prompt to ensure 100% compatibility across all regions.
- */
 const GEMINI_API_KEY = (process.env.GEMINI_API_KEY || "").trim(); 
-const GEMINI_MODEL = "gemini-1.5-flash"; 
+const GEMINI_MODEL = "gemini-2.5-flash-preview-09-2025"; 
 const APP_ID = 'mcp-studio-v1';
 
 let db: any = null;
@@ -76,21 +69,18 @@ app.post('/api/analyze-schema', async (req, res) => {
         for (const [index, chunk] of chunks.entries()) {
             const schemaSummary = chunk.map((e: any) => `- ID: "${e.id}" | Description: ${e.description}`).join('\n');
             
-            // 🚩 Instructions are bundled into the prompt for v1 compatibility
-            const userPrompt = `You are an AI Tool Architect. Suggest the 3-5 most useful endpoints from the provided list for an AI agent.
-            
-            CRITICAL: Return ONLY a JSON object with a "suggestions" key.
-            Format: {"suggestions": ["METHOD:PATH", "METHOD:PATH"]}
-            
-            Endpoints to analyze:
-            ${schemaSummary}`;
+            const systemPrompt = "You are an AI Tool Architect. Suggest the 3-5 most useful endpoints from the provided list for an AI agent. Return valid JSON only.";
+            const userPrompt = `Return a JSON object with a "suggestions" array containing the best tool IDs from this list:\n\n${schemaSummary}`;
 
-            // v1 endpoint is the most reliable for billed projects
-            const url = `https://generativelanguage.googleapis.com/v1/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
             
             const result = await axios.post(url, {
                 contents: [{ parts: [{ text: userPrompt }] }],
-                generationConfig: { temperature: 0.1 }
+                systemInstruction: { parts: [{ text: systemPrompt }] },
+                generationConfig: { 
+                    responseMimeType: "application/json",
+                    temperature: 0.1 
+                }
             });
 
             const aiRaw = result.data.candidates?.[0]?.content?.parts?.[0]?.text || "";
