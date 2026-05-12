@@ -20,12 +20,11 @@ const stripeKey = process.env.STRIPE_SECRET_KEY;
 const stripe = new Stripe(stripeKey || 'sk_test_dummy', { apiVersion: '2023-10-16' });
 
 /**
- * 🚩 BILLED ACCOUNT STABILITY FIX (v1.4.9):
- * Switching to the flagship "gemini-1.5-pro" model. 
- * This is the universally supported production model on the v1 API endpoint.
+ * 🚩 MODEL UPDATE:
+ * Using "gemini-2.5-flash" on the stable "v1" endpoint.
  */
 const GEMINI_API_KEY = (process.env.GEMINI_API_KEY || "").trim(); 
-const GEMINI_MODEL = "gemini-1.5-pro"; 
+const GEMINI_MODEL = "gemini-2.5-flash"; 
 const APP_ID = 'mcp-studio-v1';
 
 let db: any = null;
@@ -53,14 +52,14 @@ app.use((req, res, next) => {
 });
 
 // ==========================================
-// 🪄 MAGIC SUGGEST (Resilient V1 Implementation)
+// 🪄 MAGIC SUGGEST (Gemini 2.5 Flash Native)
 // ==========================================
 app.post('/api/analyze-schema', async (req, res) => {
     const { endpoints } = req.body;
     if (!GEMINI_API_KEY) return res.status(500).json({ error: "Gemini Key missing." });
     if (!endpoints || !Array.isArray(endpoints)) return res.status(400).json({ error: "Endpoints required." });
 
-    console.log(`[Magic] Analyzing ${endpoints.length} endpoints via ${GEMINI_MODEL} (v1)...`);
+    console.log(`[Magic] Analyzing ${endpoints.length} endpoints via ${GEMINI_MODEL} (v1beta)...`);
 
     try {
         const CHUNK_SIZE = 25;
@@ -74,13 +73,15 @@ app.post('/api/analyze-schema', async (req, res) => {
         for (const [index, chunk] of chunks.entries()) {
             const schemaSummary = chunk.map((e: any) => `- ID: "${e.id}" | Description: ${e.description}`).join('\n');
             
-            const userPrompt = `You are an AI Tool Architect. Suggest the 3-5 most useful endpoints from the provided list for an AI agent. 
-CRITICAL: Return ONLY a JSON object with a "suggestions" array.
+            // 🚩 Bypassing systemInstruction to ensure v1 compatibility
+            const userPrompt = `You are an AI Tool Architect. Suggest the 3-5 most useful endpoints from the provided list for an AI agent.
+CRITICAL: Return ONLY a valid JSON object with a "suggestions" array. Do not include markdown formatting or backticks.
 Format: {"suggestions": ["METHOD:PATH"]}
 
 Endpoints to analyze:
 ${schemaSummary}`;
 
+            // 🚩 Strictly using the stable v1 endpoint
             const url = `https://generativelanguage.googleapis.com/v1/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
             
             const result = await axios.post(url, {
@@ -93,7 +94,7 @@ ${schemaSummary}`;
             const aiRaw = result.data.candidates?.[0]?.content?.parts?.[0]?.text || "";
             
             if (aiRaw) {
-                // Strip markdown code blocks if the AI includes them
+                // Strip markdown code blocks in case the AI includes them anyway
                 const cleanJson = aiRaw.replace(/```json/g, "").replace(/```/g, "").trim();
                 try {
                     const parsed = JSON.parse(cleanJson);
@@ -117,7 +118,7 @@ ${schemaSummary}`;
     } catch (error: any) {
         const msg = error.response?.data?.error?.message || error.message;
         console.error("Magic Suggest Error:", msg);
-        res.status(500).json({ suggestions: [], error: `Gemini v1 Error: ${msg}` });
+        res.status(500).json({ suggestions: [], error: `Gemini 2.5 Flash Error: ${msg}` });
     }
 });
 
@@ -146,7 +147,7 @@ app.get('/sse/:serverId', async (req, res) => {
 
     const transport = new SSEServerTransport("/messages/" + serverId, res);
     activeTransports.set(serverId, transport);
-    const mcpServer = new Server({ name: "MCP-Studio", version: "1.4.9" }, { capabilities: { tools: {} } });
+    const mcpServer = new Server({ name: "MCP-Studio", version: "1.5.0" }, { capabilities: { tools: {} } });
     
     mcpServer.setRequestHandler(ListToolsRequestSchema, async () => ({
         tools: (vaultData.endpoints || []).map((ep: any) => ({
@@ -173,4 +174,4 @@ app.post('/messages/:serverId', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 MCP Proxy Live (v1.4.9) with ${GEMINI_MODEL}`));
+app.listen(PORT, () => console.log(`🚀 MCP Proxy Live (v1.5.0) with ${GEMINI_MODEL}`));
