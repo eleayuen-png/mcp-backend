@@ -11,7 +11,9 @@ import { getFirestore } from 'firebase-admin/firestore';
 
 const app = express();
 
-// 1. Define the CORS rules once
+// ==========================================
+// 🌐 1. CORS CONFIGURATION
+// ==========================================
 const corsOptions = {
     origin: ['https://eleayuen-png.github.io', 'http://localhost:5173', 'http://localhost:3000'],
     methods: ['GET', 'POST', 'OPTIONS'],
@@ -19,58 +21,35 @@ const corsOptions = {
     credentials: true
 };
 
-// 2. Apply rules to all standard routes
 app.use(cors(corsOptions));
-
-// 3. Apply the EXACT SAME rules to pre-flight (OPTIONS) requests
 app.options('*', cors(corsOptions));
 
-// Middleware to parse JSON bodies
-app.use(express.json());
-
 // ==========================================
-// 🕵️ 2. THE SPY (Logging)
+// 🕵️ 2. MIDDLEWARE & LOGGING
 // ==========================================
 app.use((req, res, next) => {
-    console.log(`[NETWORK SPY] ${req.method} request to ${req.path}`);
-    next();
+    console.log(`[NETWORK] ${req.method} request to ${req.path}`);
+    if (req.path.startsWith('/messages/') || req.path === '/api/webhook/stripe') {
+        next(); 
+    } else {
+        express.json({ limit: '50mb' })(req, res, next);
+    }
 });
 
 // ==========================================
-// 🏥 3. THE HEALTH CHECK (Crucial for Debugging)
+// 🏥 3. HEALTH CHECKS
 // ==========================================
-app.get('/health', (req, res) => {
-    res.status(200).send("🚀 MCP BACKEND IS ALIVE AND THE NEW CODE IS RUNNING!");
-});
-
-// ==========================================
-// 4. INITIALIZATION
-// ==========================================
-
-// Dummy route to ensure the server responds to health checks from Render
 app.get('/', (req, res) => {
     res.status(200).send('MCP Proxy Backend is running!');
 });
 
-// Your deploy endpoint
-app.post('/api/deploy', (req, res) => {
-    try {
-        const { endpoints, baseUrl, piiMasking } = req.body;
-        
-        // Mocking a successful deployment response for the MVP
-        const sseUrl = `https://mcp-proxy-backend.onrender.com/sse/${Math.random().toString(36).substring(7)}`;
-        
-        res.status(200).json({
-            success: true,
-            sseUrl: sseUrl,
-            message: 'Gateway deployed successfully.'
-        });
-    } catch (error) {
-        console.error('Deployment error:', error);
-        res.status(500).json({ error: 'Failed to deploy gateway.' });
-    }
+app.get('/health', (req, res) => {
+    res.status(200).send("🚀 MCP BACKEND IS ALIVE!");
 });
 
+// ==========================================
+// 🔧 4. SERVICES INITIALIZATION
+// ==========================================
 const stripeKey = process.env.STRIPE_SECRET_KEY;
 // @ts-ignore
 const stripe = new Stripe(stripeKey || 'sk_test_dummy', { apiVersion: '2023-10-16' });
@@ -89,21 +68,12 @@ try {
         db = getFirestore();
         db.settings({ ignoreUndefinedProperties: true });
     }
-} catch (e: any) { console.error("❌ Firebase Init Failed:", e.message); }
+} catch (e: any) { 
+    console.error("❌ Firebase Init Failed:", e.message); 
+}
 
 // ==========================================
-// 📡 5. MIDDLEWARE
-// ==========================================
-app.use((req, res, next) => {
-    if (req.path.startsWith('/messages/') || req.path === '/api/webhook/stripe') {
-        next(); 
-    } else {
-        express.json({ limit: '50mb' })(req, res, next);
-    }
-});
-
-// ==========================================
-// 🪄 MAGIC SUGGEST (Gemini Implementation)
+// 🪄 5. MAGIC SUGGEST (Gemini Implementation)
 // ==========================================
 app.post('/api/analyze-schema', async (req, res) => {
     const { endpoints } = req.body;
@@ -135,9 +105,7 @@ ${schemaSummary}`;
             
             const result = await axios.post(url, {
                 contents: [{ parts: [{ text: userPrompt }] }],
-                generationConfig: { 
-                    temperature: 0.1 
-                }
+                generationConfig: { temperature: 0.1 }
             });
 
             const aiRaw = result.data.candidates?.[0]?.content?.parts?.[0]?.text || "";
@@ -171,17 +139,23 @@ ${schemaSummary}`;
 });
 
 // ==========================================
-// 🚀 DEPLOYMENT & SSE
+// 🚀 6. DEPLOYMENT & SSE
 // ==========================================
 app.post('/api/deploy', async (req, res) => {
     try {
         const { endpoints, baseUrl, piiMasking } = req.body;
         const serverId = uuidv4();
         const config = { endpoints, baseUrl: baseUrl.trim(), piiMasking: !!piiMasking, createdAt: new Date().toISOString() };
-        if (db) await db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('deployments').doc(serverId).set(config);
+        
+        if (db) {
+            await db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('deployments').doc(serverId).set(config);
+        }
+        
         const publicUrl = process.env.RENDER_EXTERNAL_URL || `https://${req.get('host')}`;
         res.json({ success: true, sseUrl: `${publicUrl}/sse/${serverId}` });
-    } catch (err: any) { res.status(500).json({ error: "Deploy Error", details: err.message }); }
+    } catch (err: any) { 
+        res.status(500).json({ error: "Deploy Error", details: err.message }); 
+    }
 });
 
 const activeTransports = new Map<string, SSEServerTransport>();
@@ -189,11 +163,13 @@ const activeTransports = new Map<string, SSEServerTransport>();
 app.get('/sse/:serverId', async (req, res) => {
     const serverId = req.params.serverId;
     if (!db) return res.status(500).send("DB Error");
+    
     const doc = await db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('deployments').doc(serverId).get();
     if (!doc.exists) return res.status(404).send("Not found.");
+    
     const vaultData = doc.data();
-
     const transport = new SSEServerTransport("/messages/" + serverId, res);
+    
     activeTransports.set(serverId, transport);
     const mcpServer = new Server({ name: "MCP-Studio", version: "1.5.4" }, { capabilities: { tools: {} } });
     
@@ -209,6 +185,7 @@ app.get('/sse/:serverId', async (req, res) => {
         const toolName = req.params.name.toLowerCase();
         const ep = vaultData.endpoints.find((e: any) => `${e.method}_${e.path.replace(/[^a-zA-Z0-9]/g, '_')}`.toLowerCase() === toolName);
         if (!ep) throw new Error("Tool not found.");
+        
         const resp = await axios({ method: ep.method, url: `${vaultData.baseUrl}${ep.path}` });
         return { content: [{ type: "text", text: JSON.stringify(resp.data, null, 2) }] };
     });
@@ -221,7 +198,10 @@ app.post('/messages/:serverId', async (req, res) => {
     if (transport) await transport.handlePostMessage(req, res);
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT as number, '0.0.0.0', () => {
+// ==========================================
+// 🏁 7. START SERVER
+// ==========================================
+const PORT = parseInt(process.env.PORT || '3000', 10);
+app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 MCP Proxy Live (v1.5.4) on port ${PORT} with ${GEMINI_MODEL}`);
 });
