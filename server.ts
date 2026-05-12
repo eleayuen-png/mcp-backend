@@ -20,7 +20,7 @@ const stripeKey = process.env.STRIPE_SECRET_KEY;
 const stripe = new Stripe(stripeKey || 'sk_test_dummy', { apiVersion: '2023-10-16' });
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || ""; 
-const GEMINI_MODEL = "gemini-1.5-flash"; 
+const GEMINI_MODEL = "gemini-1.5-flash-latest"; 
 const APP_ID = 'mcp-studio-v1';
 
 let db: any = null;
@@ -59,7 +59,7 @@ async function getDeployment(serverId: string) {
     } catch (e) { return null; }
 }
 
-app.get('/api/health', (req, res) => res.json({ status: "ok", version: "1.3.2", dbConnected: !!db }));
+app.get('/api/health', (req, res) => res.json({ status: "ok", version: "1.3.3", dbConnected: !!db }));
 
 // ==========================================
 // 💳 3. STRIPE WEBHOOK
@@ -220,7 +220,7 @@ app.get('/sse/:serverId', async (req, res) => {
     const transport = new SSEServerTransport("/messages/" + serverId, res);
     activeTransports.set(serverId, transport);
 
-    const mcpServer = new Server({ name: "MCP-Studio-Proxy", version: "1.3.2" }, { capabilities: { tools: {} } });
+    const mcpServer = new Server({ name: "MCP-Studio-Proxy", version: "1.3.3" }, { capabilities: { tools: {} } });
 
     mcpServer.setRequestHandler(ListToolsRequestSchema, async () => ({
         tools: (vaultData.endpoints || []).map((ep: any) => ({
@@ -264,4 +264,4 @@ app.post('/messages/:serverId', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 MCP Proxy v1.3.2 Live on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 MCP Proxy v1.3.3 Live on port ${PORT}`));
