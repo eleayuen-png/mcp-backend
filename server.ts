@@ -15,31 +15,26 @@ app.use(cors());
 // 🚀 1. INITIALIZATION
 // ==========================================
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || ""; 
-const GEMINI_MODEL = "gemini-2.0-flash-exp";
+const GEMINI_MODEL = "gemini-1.5-flash"; // Switched to a more common stable model string
 const APP_ID = 'mcp-studio-v1';
 
 let db: any = null;
 try {
-    if (process.env.FIREBASE_SERVICE_ACCOUNT) {
-        if (getApps().length === 0) {
-            const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-            initializeApp({ credential: cert(serviceAccount) });
-        }
+    if (process.env.FIREBASE_SERVICE_ACCOUNT && getApps().length === 0) {
+        const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+        initializeApp({ credential: cert(serviceAccount) });
         db = getFirestore();
-        console.log("🔥 Firebase Admin Initialized Successfully.");
-    } else {
-        console.warn("⚠️ FIREBASE_SERVICE_ACCOUNT not found. Data will not persist across restarts.");
+        console.log("🔥 Firebase Admin Initialized.");
     }
 } catch (e: any) { 
-    console.error("❌ Firebase Admin Init Failed:", e.message); 
+    console.error("❌ Firebase Init Failed:", e.message); 
 }
 
 // ==========================================
-// 📡 2. MIDDLEWARE & HELPERS
+// 📡 2. MIDDLEWARE (The Stream Protector)
 // ==========================================
-
-// Custom middleware to handle JSON but skip for MCP message streams
 app.use((req, res, next) => {
+    // We skip JSON parsing for /messages/ because it breaks the SSE stream
     if (req.path.startsWith('/messages/')) {
         next(); 
     } else {
@@ -60,17 +55,16 @@ async function getDeployment(serverId: string) {
 // ==========================================
 
 /**
- * 🪄 MAGIC SUGGEST (RESTORED)
+ * 🪄 MAGIC SUGGEST
+ * Improved with AI response cleaning logic.
  */
 app.post('/api/analyze-schema', async (req, res) => {
     const { endpoints } = req.body;
+    if (!GEMINI_API_KEY) return res.status(500).json({ error: "API Key missing" });
     
-    if (!GEMINI_API_KEY) return res.status(500).json({ error: "Gemini API key not configured on server." });
-    if (!endpoints || !Array.isArray(endpoints)) return res.status(400).json({ error: "No endpoints provided." });
-
     try {
-        const schemaSummary = endpoints.map((e: any) => `- ID: ${e.id}\n  Description: ${e.description}`).join('\n');
-        const systemPrompt = `Analyze the API list and suggest the top 5-10 most 'agentic' ones. Return ONLY JSON with a "suggestions" key.`;
+        const schemaSummary = endpoints.map((e: any) => `- ID: ${e.id}\n  Desc: ${e.description}`).join('\n');
+        const systemPrompt = `Analyze the API list and suggest the top 5-10 most 'agentic' ones. Return ONLY a JSON object with a "suggestions" key containing an array of IDs. No markdown, no chatter.`;
         const userPrompt = `Suggest tools:\n\n${schemaSummary}`;
 
         const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
@@ -80,48 +74,29 @@ app.post('/api/analyze-schema', async (req, res) => {
             generationConfig: { responseMimeType: "application/json", temperature: 0.1 }
         });
         
-        const aiText = result.data.candidates?.[0]?.content?.parts?.[0]?.text;
-        res.json(JSON.parse(aiText || '{"suggestions": []}'));
+        let aiText = result.data.candidates?.[0]?.content?.parts?.[0]?.text || '{"suggestions":[]}';
+        
+        // 🚩 FIX: Clean AI "Chatter" (remove markdown code blocks if they exist)
+        const cleanedJson = aiText.replace(/```json|```/g, "").trim();
+        
+        res.json(JSON.parse(cleanedJson));
     } catch (error: any) {
-        console.error("AI Analysis Error:", error.message);
-        res.status(500).json({ error: "Failed to analyze schema." });
+        console.error("AI Error Details:", error.response?.data || error.message);
+        res.status(500).json({ error: "AI Analysis failed.", details: error.message });
     }
 });
 
-/**
- * 🚀 DEPLOYMENT (FIXED 500 ERROR)
- */
 app.post('/api/deploy', async (req, res) => {
-    try {
-        const { apiKey, endpoints, baseUrl, piiMasking } = req.body;
-        
-        if (!baseUrl) return res.status(400).json({ error: "Base URL is required." });
-
-        const serverId = uuidv4();
-        const config = { 
-            apiKey: apiKey || 'no-key', 
-            endpoints: endpoints || [], 
-            baseUrl, 
-            piiMasking: !!piiMasking, 
-            createdAt: new Date().toISOString() 
-        };
-        
-        // Wrap database call in try-catch to prevent 500 crashes
-        if (db) {
-            try {
-                await db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('deployments').doc(serverId).set(config);
-            } catch (dbErr: any) {
-                console.error("Firestore Save Error:", dbErr.message);
-                // We continue even if DB fails, though it won't persist after restart
-            }
-        }
-
-        const publicUrl = process.env.RENDER_EXTERNAL_URL || `http://localhost:${process.env.PORT || 3000}`;
-        res.json({ success: true, sseUrl: `${publicUrl}/sse/${serverId}` });
-    } catch (err: any) {
-        console.error("Global Deploy Error:", err.message);
-        res.status(500).json({ error: "Internal Server Error during deployment." });
+    const { apiKey, endpoints, baseUrl, piiMasking } = req.body;
+    const serverId = uuidv4();
+    const config = { apiKey, endpoints, baseUrl, piiMasking: !!piiMasking, createdAt: new Date().toISOString() };
+    
+    if (db) {
+        await db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('deployments').doc(serverId).set(config);
     }
+
+    const publicUrl = process.env.RENDER_EXTERNAL_URL || `http://localhost:${process.env.PORT || 3000}`;
+    res.json({ success: true, sseUrl: `${publicUrl}/sse/${serverId}` });
 });
 
 // ==========================================
@@ -132,13 +107,12 @@ const activeTransports = new Map<string, SSEServerTransport>();
 app.get('/sse/:serverId', async (req, res) => {
     const serverId = req.params.serverId;
     const vaultData = await getDeployment(serverId);
-    
-    if (!vaultData) return res.status(404).send("Server configuration not found.");
+    if (!vaultData) return res.status(404).send("Config not found.");
 
     const transport = new SSEServerTransport("/messages/" + serverId, res);
     activeTransports.set(serverId, transport);
 
-    const mcpServer = new Server({ name: "MCP-Studio-Proxy", version: "1.2.4" }, { capabilities: { tools: {} } });
+    const mcpServer = new Server({ name: "MCP-Studio-Proxy", version: "1.2.5" }, { capabilities: { tools: {} } });
 
     mcpServer.setRequestHandler(ListToolsRequestSchema, async () => ({
         tools: (vaultData.endpoints || []).map((ep: any) => ({
@@ -172,7 +146,14 @@ app.get('/sse/:serverId', async (req, res) => {
     await mcpServer.connect(transport);
 });
 
-app.post('/sse/:serverId', (req, res) => res.status(200).send("OK"));
+/**
+ * 🚩 FIX: CURSOR HANDSHAKE
+ * We respond with a 405 (Method Not Allowed) to Cursor's POST probe.
+ * This tells Cursor: "I don't support high-speed POST mode, please use standard GET SSE."
+ */
+app.post('/sse/:serverId', (req, res) => {
+    res.status(405).send("Use GET for SSE");
+});
 
 app.post('/messages/:serverId', async (req, res) => {
     const transport = activeTransports.get(req.params.serverId);
@@ -181,4 +162,4 @@ app.post('/messages/:serverId', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 Proxy Backend Live on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 Proxy Live on port ${PORT}`));
