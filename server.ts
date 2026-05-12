@@ -21,11 +21,10 @@ const stripe = new Stripe(stripeKey || 'sk_test_dummy', { apiVersion: '2023-10-1
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || ""; 
 /**
- * 🚩 MODEL UPGRADE: 
- * Switching to "gemini-1.5-pro" to resolve the "model not found" 
- * error occurring with the flash variant on the v1beta endpoint.
+ * 🚩 STABILITY FIX: Using "gemini-1.5-flash-8b".
+ * This is the most available model for free-tier users across all regions.
  */
-const GEMINI_MODEL = "gemini-1.5-pro"; 
+const GEMINI_MODEL = "gemini-1.5-flash-8b"; 
 const APP_ID = 'mcp-studio-v1';
 
 let db: any = null;
@@ -48,7 +47,6 @@ try {
 // ==========================================
 app.use((req, res, next) => {
     if (req.method === 'POST') console.log(`[REQ] ${req.path}`);
-    
     if (req.path.startsWith('/messages/') || req.path === '/api/webhook/stripe') {
         next(); 
     } else {
@@ -65,15 +63,20 @@ async function getDeployment(serverId: string) {
 }
 
 /**
- * 🛠 DEBUG ENDPOINT: List Available Models
- * Visit this in your browser to see what your API Key supports.
+ * 🛠 DEBUG ENDPOINT
+ * If this returns a 400, your API Key is likely invalid or has a trailing space.
  */
 app.get('/api/models', async (req, res) => {
+    if (!GEMINI_API_KEY) return res.status(500).json({ error: "API Key is missing from Environment Variables." });
+
     try {
-        const response = await axios.get(`https://generativelanguage.googleapis.com/v1beta/models?key=${GEMINI_API_KEY}`);
+        // We use v1beta to list models
+        const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${GEMINI_API_KEY.trim()}`;
+        const response = await axios.get(url);
         res.json(response.data);
     } catch (error: any) {
-        res.status(500).json({ error: error.message });
+        const googleError = error.response?.data?.error?.message || error.message;
+        res.status(error.response?.status || 500).json({ error: "Google API rejected the request", details: googleError });
     }
 });
 
@@ -85,7 +88,6 @@ app.get('/api/health', (req, res) => res.json({ status: "ok", model: GEMINI_MODE
 
 app.post('/api/analyze-schema', async (req, res) => {
     const { endpoints } = req.body;
-    
     if (!GEMINI_API_KEY) return res.status(500).json({ error: "Gemini Key missing on server." });
     if (!endpoints || !Array.isArray(endpoints)) return res.status(400).json({ error: "Endpoints required." });
 
@@ -99,7 +101,8 @@ app.post('/api/analyze-schema', async (req, res) => {
 
         const userPrompt = `Choose the 5-10 best tools from this list. Return ONLY the IDs:\n\n${schemaSummary}`;
 
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+        // Ensure key is trimmed to prevent accidental spaces causing 400 errors
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY.trim()}`;
         
         const result = await axios.post(url, {
             contents: [{ parts: [{ text: userPrompt }] }],
@@ -109,9 +112,7 @@ app.post('/api/analyze-schema', async (req, res) => {
         
         const aiRaw = result.data.candidates?.[0]?.content?.parts?.[0]?.text;
 
-        if (!aiRaw) {
-             return res.status(500).json({ suggestions: [], error: "AI returned no content. Check /api/models for availability." });
-        }
+        if (!aiRaw) throw new Error("AI returned no content.");
 
         const parsed = JSON.parse(aiRaw);
         const suggestions = (parsed.suggestions || []).map((s: string) => s.replace(/"/g, '').trim());
@@ -123,7 +124,7 @@ app.post('/api/analyze-schema', async (req, res) => {
     } catch (error: any) {
         const realErrorReason = error.response?.data?.error?.message || error.message || "Unknown AI Error";
         console.error("Magic Suggest Error:", realErrorReason);
-        res.status(500).json({ suggestions: [], error: realErrorReason });
+        res.status(500).json({ suggestions: [], error: `Gemini API Error: ${realErrorReason}` });
     }
 });
 
@@ -208,4 +209,4 @@ app.post('/messages/:serverId', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 MCP Proxy Live with ${GEMINI_MODEL}`));
+app.listen(PORT, () => console.log(`🚀 MCP Proxy Live`));
