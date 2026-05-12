@@ -20,6 +20,7 @@ const stripeKey = process.env.STRIPE_SECRET_KEY;
 const stripe = new Stripe(stripeKey || 'sk_test_dummy', { apiVersion: '2023-10-16' });
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || ""; 
+// 🚩 PERMANENT FIX: Using the universally available public model for Render
 const GEMINI_MODEL = "gemini-2.0-flash"; 
 const APP_ID = 'mcp-studio-v1';
 
@@ -32,7 +33,7 @@ try {
         }
         db = getFirestore();
         db.settings({ ignoreUndefinedProperties: true });
-        console.log("🔥 Firestore v1.3.4 Ready.");
+        console.log("🔥 Firestore v1.3.5 Ready.");
     }
 } catch (e: any) { 
     console.error("❌ Firebase Init Failed:", e.message); 
@@ -59,7 +60,7 @@ async function getDeployment(serverId: string) {
     } catch (e) { return null; }
 }
 
-app.get('/api/health', (req, res) => res.json({ status: "ok", version: "1.3.4", dbConnected: !!db }));
+app.get('/api/health', (req, res) => res.json({ status: "ok", version: "1.3.5", dbConnected: !!db }));
 
 // ==========================================
 // 💳 3. STRIPE WEBHOOK
@@ -99,13 +100,10 @@ app.post('/api/analyze-schema', async (req, res) => {
     console.log("========== MAGIC SUGGEST TRIGGERED ==========");
     const { endpoints } = req.body;
     
-    if (!GEMINI_API_KEY) return res.status(500).json({ error: "Gemini Key missing." });
+    if (!GEMINI_API_KEY) return res.status(500).json({ error: "Gemini Key missing on server." });
     if (!endpoints || !Array.isArray(endpoints)) return res.status(400).json({ error: "Endpoints required." });
 
     console.log(`[Diagnostic] Received ${endpoints.length} endpoints from frontend.`);
-    if (endpoints.length > 0) {
-        console.log(`[Diagnostic] Sample endpoint ID format: "${endpoints[0].id}"`);
-    }
 
     try {
         const schemaSummary = endpoints.slice(0, 100).map((e: any) => `- ID: "${e.id}" | Description: ${e.description}`).join('\n');
@@ -130,8 +128,7 @@ app.post('/api/analyze-schema', async (req, res) => {
         console.log(`[Diagnostic] RAW AI Response:\n`, aiRaw);
 
         if (!aiRaw) {
-             console.log("[Diagnostic] AI returned no content.");
-             return res.json({ suggestions: [], error: "AI returned no content" });
+             return res.status(500).json({ suggestions: [], error: "AI returned no content" });
         }
 
         let suggestions: string[] = [];
@@ -145,24 +142,14 @@ app.post('/api/analyze-schema', async (req, res) => {
                 const parsed = JSON.parse(jsonMatch[0]);
                 suggestions = (parsed.suggestions || []).map((s: string) => s.replace(/"/g, '').trim());
             } else {
-                console.log("[Diagnostic] Regex match failed to find JSON.");
                 throw new Error("Could not parse AI response as JSON");
             }
         }
 
-        console.log(`[Diagnostic] Extracted Suggestions Array:`, suggestions);
-
         const validIds = endpoints.map((e: any) => e.id);
         const matched = suggestions.filter((s: string) => validIds.includes(s));
-        const unmatched = suggestions.filter((s: string) => !validIds.includes(s));
-
-        console.log(`[Diagnostic] Valid Matches: ${matched.length}, Hallucinations: ${unmatched.length}`);
-        if (unmatched.length > 0) {
-            console.warn(`[Diagnostic] Unmatched IDs from AI:`, unmatched);
-        }
-
-        console.log("=============================================");
-        res.json({ suggestions, matched, unmatched });
+        
+        res.json({ suggestions, matched });
 
     } catch (error: any) {
         const realErrorReason = error.response?.data?.error?.message || error.message || "Unknown AI Error";
@@ -215,7 +202,7 @@ app.get('/sse/:serverId', async (req, res) => {
     const transport = new SSEServerTransport("/messages/" + serverId, res);
     activeTransports.set(serverId, transport);
 
-    const mcpServer = new Server({ name: "MCP-Studio-Proxy", version: "1.3.4" }, { capabilities: { tools: {} } });
+    const mcpServer = new Server({ name: "MCP-Studio-Proxy", version: "1.3.5" }, { capabilities: { tools: {} } });
 
     mcpServer.setRequestHandler(ListToolsRequestSchema, async () => ({
         tools: (vaultData.endpoints || []).map((ep: any) => ({
@@ -258,4 +245,4 @@ app.post('/messages/:serverId', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 MCP Proxy v1.3.4 Live on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 MCP Proxy v1.3.5 Live on port ${PORT}`));
