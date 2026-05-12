@@ -11,14 +11,14 @@ import { getFirestore } from 'firebase-admin/firestore';
 
 const app = express();
 
-// ==========================================
-// 🛡️ 1. BULLETPROOF CORS (Using the official package)
-// ==========================================
+// Harden CORS for GitHub Pages and local development
 app.use(cors({
-    origin: '*', // Allow ALL origins (GitHub Pages)
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'Accept']
+    origin: ['https://eleayuen-png.github.io', 'http://localhost:5173', 'http://localhost:3000'],
+    methods: ['GET', 'POST', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    credentials: true
 }));
+app.options('*', cors()); // Explicitly handle pre-flight requests
 
 // ==========================================
 // 🕵️ 2. THE SPY (Logging)
