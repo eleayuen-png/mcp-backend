@@ -19,8 +19,13 @@ const stripeKey = process.env.STRIPE_SECRET_KEY;
 // @ts-ignore
 const stripe = new Stripe(stripeKey || 'sk_test_dummy', { apiVersion: '2023-10-16' });
 
+/**
+ * 🚩 BILLED ACCOUNT STABILITY FIX (v1.4.9):
+ * Switching to the flagship "gemini-1.5-pro" model. 
+ * This is the universally supported production model on the v1 API endpoint.
+ */
 const GEMINI_API_KEY = (process.env.GEMINI_API_KEY || "").trim(); 
-const GEMINI_MODEL = "gemini-1.5-flash"; 
+const GEMINI_MODEL = "gemini-1.5-pro"; 
 const APP_ID = 'mcp-studio-v1';
 
 let db: any = null;
@@ -141,7 +146,7 @@ app.get('/sse/:serverId', async (req, res) => {
 
     const transport = new SSEServerTransport("/messages/" + serverId, res);
     activeTransports.set(serverId, transport);
-    const mcpServer = new Server({ name: "MCP-Studio", version: "1.4.8" }, { capabilities: { tools: {} } });
+    const mcpServer = new Server({ name: "MCP-Studio", version: "1.4.9" }, { capabilities: { tools: {} } });
     
     mcpServer.setRequestHandler(ListToolsRequestSchema, async () => ({
         tools: (vaultData.endpoints || []).map((ep: any) => ({
@@ -168,4 +173,4 @@ app.post('/messages/:serverId', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 MCP Proxy Live (v1.4.8) with ${GEMINI_MODEL}`));
+app.listen(PORT, () => console.log(`🚀 MCP Proxy Live (v1.4.9) with ${GEMINI_MODEL}`));
