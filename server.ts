@@ -42,15 +42,18 @@ app.use((req, res, next) => {
     next();
 });
 
-// Middleware to parse JSON bodies
-app.use(express.json({ limit: '50mb' }));
-
 // ==========================================
 // 🕵️ 2. MIDDLEWARE & LOGGING
 // ==========================================
 app.use((req, res, next) => {
     console.log(`[NETWORK SPY] ${req.method} request to ${req.path}`);
-    next();
+    
+    // 🚨 CRITICAL FIX: Skip JSON parsing for SSE routes to prevent stream consumption!
+    if (req.path.startsWith('/sse/')) {
+        next(); 
+    } else {
+        express.json({ limit: '50mb' })(req, res, next);
+    }
 });
 
 // ==========================================
@@ -193,12 +196,12 @@ app.get('/sse/:serverId', async (req, res) => {
         
         const vaultData = doc.data() || {};
         
-        // 🚨 CRITICAL FIX: Dynamically import MCP SDK modules to prevent ESM startup crash!
         const { Server } = await import("@modelcontextprotocol/sdk/server/index.js");
         const { SSEServerTransport } = await import("@modelcontextprotocol/sdk/server/sse.js");
         const { CallToolRequestSchema, ListToolsRequestSchema } = await import("@modelcontextprotocol/sdk/types.js");
 
-        const transport = new SSEServerTransport("/messages/" + serverId, res);
+        // 🚨 CRITICAL FIX: The transport expects POST messages to match its exact path!
+        const transport = new SSEServerTransport("/sse/" + serverId, res);
         
         activeTransports.set(serverId, transport);
         const mcpServer = new Server({ name: "MCP-Studio", version: "1.5.4" }, { capabilities: { tools: {} } });
@@ -227,7 +230,8 @@ app.get('/sse/:serverId', async (req, res) => {
     }
 });
 
-app.post('/messages/:serverId', async (req, res) => {
+// 🚨 CRITICAL FIX: Change from /messages/:serverId to /sse/:serverId
+app.post('/sse/:serverId', async (req, res) => {
     try {
         const transport = activeTransports.get(req.params.serverId);
         if (transport) {
