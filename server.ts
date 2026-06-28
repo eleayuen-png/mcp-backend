@@ -372,7 +372,7 @@ const PRICE_INTERVALS: Record<string, string> = {
     'price_1TXKqQG8ojULiiimRWvvLceo': 'monthly',
     'price_1TnE52G8ojULiiimf7H4FO34': 'quarterly',
     'price_1TnEQCG8ojULiiimWzEhRn0o': 'semiannual',
-    'price_1TnEQUG8ojULiiimrxYClwK4': 'annual',
+    'price_1TnEpKG8ojULiiim1X4Q9u02': 'annual',
 };
 
 async function setUserPro(uid: string, isPro: boolean, extra: Record<string, any> = {}) {
