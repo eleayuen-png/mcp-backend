@@ -49,9 +49,9 @@ app.use((req, res, next) => {
 app.use((req, res, next) => {
     console.log(`[NETWORK SPY] ${req.method} request to ${req.path}`);
     
-    // 🚨 CRITICAL FIX: Skip JSON parsing for SSE routes to prevent stream consumption!
-    if (req.path.startsWith('/sse/')) {
-        next(); 
+    // Skip body parsing for SSE (stream) and Stripe webhook (needs raw bytes for sig verification)
+    if (req.path.startsWith('/sse/') || req.path === '/api/stripe/webhook') {
+        next();
     } else {
         express.json({ limit: '50mb' })(req, res, next);
     }
@@ -365,7 +365,104 @@ app.get('/api/analytics/live', adminMiddleware, async (req: any, res: any) => {
 });
 
 // ==========================================
-// 🏁 8. START SERVER
+// 💳 8. STRIPE WEBHOOK
+// ==========================================
+
+const PRICE_INTERVALS: Record<string, string> = {
+    'price_1TXKqQG8ojULiiimRWvvLceo': 'monthly',
+    'price_1TnE52G8ojULiiimf7H4FO34': 'quarterly',
+    'price_1TnE5IG8ojULiiimblMwSLGt': 'semiannual',
+    'price_1TnE5YG8ojULiiimbd7OV6Oh': 'annual',
+};
+
+async function setUserPro(uid: string, isPro: boolean, extra: Record<string, any> = {}) {
+    if (!db) return;
+    const ref = db.collection('artifacts').doc(APP_ID)
+        .collection('users').doc(uid)
+        .collection('project').doc('current');
+    await ref.set({ isPro, ...extra }, { merge: true });
+}
+
+async function uidFromCustomer(customerId: string): Promise<string | null> {
+    if (!db) return null;
+    const doc = await db.collection('stripe_customers').doc(customerId).get();
+    return doc.exists ? doc.data()?.uid : null;
+}
+
+app.post('/api/stripe/webhook', express.raw({ type: '*/*' }), async (req: any, res: any) => {
+    const sig = req.headers['stripe-signature'];
+    const secret = process.env.STRIPE_WEBHOOK_SECRET;
+
+    if (!secret) {
+        console.error('❌ STRIPE_WEBHOOK_SECRET not set');
+        return res.status(500).send('Webhook secret not configured');
+    }
+    if (!stripe) return res.status(500).send('Stripe not initialized');
+
+    let event: any;
+    try {
+        event = stripe.webhooks.constructEvent(req.body, sig, secret);
+    } catch (e: any) {
+        console.error('⚠️ Webhook signature failed:', e.message);
+        return res.status(400).send(`Webhook Error: ${e.message}`);
+    }
+
+    console.log(`[Stripe] Event: ${event.type}`);
+
+    try {
+        if (event.type === 'checkout.session.completed') {
+            const session = event.data.object;
+            const uid = session.client_reference_id;
+            const customerId = session.customer;
+            const subscriptionId = session.subscription;
+            if (!uid || !subscriptionId) return res.json({ received: true });
+
+            const sub = await stripe.subscriptions.retrieve(subscriptionId);
+            const priceId = sub.items.data[0]?.price?.id;
+            const planInterval = PRICE_INTERVALS[priceId] || 'monthly';
+            const proExpiresAt = new Date(sub.current_period_end * 1000).toISOString();
+
+            await setUserPro(uid, true, { planInterval, proExpiresAt, stripeSubscriptionId: subscriptionId, stripeCustomerId: customerId });
+            if (db) await db.collection('stripe_customers').doc(customerId).set({ uid });
+
+            console.log(`[Stripe] ✅ Pro activated for uid=${uid} plan=${planInterval} expires=${proExpiresAt}`);
+        }
+
+        else if (event.type === 'customer.subscription.updated') {
+            const sub = event.data.object;
+            const uid = await uidFromCustomer(sub.customer);
+            if (!uid) return res.json({ received: true });
+
+            const priceId = sub.items.data[0]?.price?.id;
+            const planInterval = PRICE_INTERVALS[priceId] || 'monthly';
+            const proExpiresAt = new Date(sub.current_period_end * 1000).toISOString();
+            const active = sub.status === 'active';
+
+            await setUserPro(uid, active, active
+                ? { planInterval, proExpiresAt }
+                : { planInterval: null, proExpiresAt: null }
+            );
+            console.log(`[Stripe] 🔄 Subscription updated uid=${uid} status=${sub.status}`);
+        }
+
+        else if (event.type === 'customer.subscription.deleted') {
+            const sub = event.data.object;
+            const uid = await uidFromCustomer(sub.customer);
+            if (!uid) return res.json({ received: true });
+
+            await setUserPro(uid, false, { planInterval: null, proExpiresAt: null });
+            console.log(`[Stripe] ❌ Pro cancelled uid=${uid}`);
+        }
+    } catch (e: any) {
+        console.error('[Stripe] Webhook handler error:', e.message);
+        return res.status(500).send('Webhook handler failed');
+    }
+
+    res.json({ received: true });
+});
+
+// ==========================================
+// 🏁 9. START SERVER
 // ==========================================
 try {
     const PORT = Number(process.env.PORT) || 3000;
