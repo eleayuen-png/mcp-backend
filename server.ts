@@ -5,6 +5,7 @@ import axios from 'axios';
 import Stripe from 'stripe';
 import { initializeApp, cert, getApps } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
+import { getAuth } from 'firebase-admin/auth';
 
 // ==========================================
 // 🛡️ 0. CRASH PROTECTION
@@ -246,7 +247,125 @@ app.post('/sse/:serverId', async (req, res) => {
 });
 
 // ==========================================
-// 🏁 7. START SERVER
+// 📊 7. ANALYTICS (Admin Only)
+// ==========================================
+
+const analyticsCache: Record<string, { data: any; fetchedAt: number }> = {};
+const CACHE_TTL_MS = 30_000;
+
+async function fetchPostHogEvents(days: number): Promise<any[]> {
+    const cacheKey = `events_${days}d`;
+    const cached = analyticsCache[cacheKey];
+    if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) return cached.data;
+
+    const personalKey = process.env.POSTHOG_PERSONAL_API_KEY;
+    const projectId = process.env.POSTHOG_PROJECT_ID;
+    if (!personalKey || !projectId) throw new Error('PostHog env vars not configured');
+
+    const resp = await axios.get(`https://us.posthog.com/api/projects/${projectId}/events/`, {
+        params: { date_from: `-${days}d`, limit: 1000 },
+        headers: { Authorization: `Bearer ${personalKey}` }
+    });
+
+    const events = resp.data.results || [];
+    analyticsCache[cacheKey] = { data: events, fetchedAt: Date.now() };
+    return events;
+}
+
+const adminMiddleware = async (req: any, res: any, next: any) => {
+    if (!db) return res.status(503).json({ error: 'Firebase not initialized' });
+
+    const authHeader = req.headers.authorization as string | undefined;
+    if (!authHeader?.startsWith('Bearer ')) {
+        return res.status(401).json({ error: 'No token provided' });
+    }
+
+    try {
+        const decoded = await getAuth().verifyIdToken(authHeader.slice(7));
+        const adminEmails = (process.env.ADMIN_EMAILS || '')
+            .split(',')
+            .map((e: string) => e.trim().toLowerCase());
+
+        if (!decoded.email || !adminEmails.includes(decoded.email.toLowerCase())) {
+            return res.status(403).json({ error: 'Not authorized' });
+        }
+
+        req.adminUser = decoded;
+        next();
+    } catch {
+        return res.status(401).json({ error: 'Invalid token' });
+    }
+};
+
+app.get('/api/analytics/summary', adminMiddleware, async (req: any, res: any) => {
+    try {
+        const [e7, e30] = await Promise.all([fetchPostHogEvents(7), fetchPostHogEvents(30)]);
+        res.json({
+            pageviews_7d: e7.filter((e: any) => e.event === '$pageview').length,
+            pageviews_30d: e30.filter((e: any) => e.event === '$pageview').length,
+            unique_users_7d: new Set(e7.map((e: any) => e.distinct_id)).size,
+            unique_users_30d: new Set(e30.map((e: any) => e.distinct_id)).size,
+            deployments_7d: e7.filter((e: any) => e.event === 'server_deployed').length,
+            upgrade_clicks_7d: e7.filter((e: any) => e.event === 'pro_upgrade_clicked').length,
+        });
+    } catch (e: any) {
+        console.error('Analytics summary error:', e.message);
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.get('/api/analytics/timeseries', adminMiddleware, async (req: any, res: any) => {
+    try {
+        const events = await fetchPostHogEvents(7);
+
+        const groups: Record<string, { pageviews: number; deployments: number }> = {};
+        for (let i = 6; i >= 0; i--) {
+            const d = new Date();
+            d.setDate(d.getDate() - i);
+            groups[d.toISOString().split('T')[0]] = { pageviews: 0, deployments: 0 };
+        }
+        events.forEach((e: any) => {
+            const date = (e.timestamp || '').split('T')[0];
+            if (!groups[date]) return;
+            if (e.event === '$pageview') groups[date].pageviews++;
+            if (e.event === 'server_deployed') groups[date].deployments++;
+        });
+
+        res.json(
+            Object.entries(groups)
+                .sort(([a], [b]) => a.localeCompare(b))
+                .map(([date, counts]) => ({ date: date.slice(5), ...counts }))
+        );
+    } catch (e: any) {
+        console.error('Analytics timeseries error:', e.message);
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.get('/api/analytics/live', adminMiddleware, async (req: any, res: any) => {
+    try {
+        const events = await fetchPostHogEvents(1);
+        res.json(
+            events.slice(0, 25).map((e: any) => ({
+                id: e.uuid,
+                event: e.event,
+                distinct_id: e.distinct_id,
+                timestamp: e.timestamp,
+                properties: {
+                    url: e.properties?.$current_url || e.properties?.$pathname,
+                    browser: e.properties?.$browser,
+                    os: e.properties?.$os,
+                },
+            }))
+        );
+    } catch (e: any) {
+        console.error('Analytics live error:', e.message);
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// ==========================================
+// 🏁 8. START SERVER
 // ==========================================
 try {
     const PORT = Number(process.env.PORT) || 3000;
