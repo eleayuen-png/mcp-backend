@@ -192,7 +192,40 @@ app.post('/api/deploy', async (req, res) => {
     }
 });
 
-const activeTransports = new Map<string, any>(); // Using 'any' because SSEServerTransport is dynamically imported
+const activeTransports = new Map<string, any>();
+
+// OAuth2 token cache: serverId → credId → { token, expiresAt }
+const oauthCache = new Map<string, Map<string, { token: string; expiresAt: number }>>();
+
+async function getOAuthToken(serverId: string, cred: any): Promise<string> {
+    let serverCache = oauthCache.get(serverId);
+    if (!serverCache) { serverCache = new Map(); oauthCache.set(serverId, serverCache); }
+
+    const cached = serverCache.get(cred.id);
+    if (cached && Date.now() < cached.expiresAt - 30_000) return cached.token;
+
+    const params = new URLSearchParams();
+    params.set('client_id', cred.clientId || '');
+    params.set('client_secret', cred.key || '');
+
+    if (cred.type === 'oauth2-cc') {
+        params.set('grant_type', 'client_credentials');
+        if (cred.scopes) params.set('scope', cred.scopes);
+    } else {
+        params.set('grant_type', 'refresh_token');
+        params.set('refresh_token', cred.refreshToken || '');
+        if (cred.scopes) params.set('scope', cred.scopes);
+    }
+
+    const resp = await axios.post(cred.tokenUrl, params.toString(), {
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    });
+
+    const token: string = resp.data.access_token;
+    const expiresMs = ((resp.data.expires_in as number) || 3600) * 1000;
+    serverCache.set(cred.id, { token, expiresAt: Date.now() + expiresMs });
+    return token;
+}
 
 app.get('/sse/:serverId', async (req, res) => {
     try {
@@ -246,6 +279,13 @@ app.get('/sse/:serverId', async (req, res) => {
                     authQueryParams[cred.queryParam || 'api_key'] = cred.key;
                 } else if (cred.type === 'basic') {
                     authHeaders['Authorization'] = `Basic ${Buffer.from(cred.key).toString('base64')}`;
+                } else if (cred.type === 'oauth2-cc' || cred.type === 'oauth2-refresh') {
+                    try {
+                        const oauthToken = await getOAuthToken(serverId, cred);
+                        authHeaders['Authorization'] = `Bearer ${oauthToken}`;
+                    } catch (oauthErr: any) {
+                        console.error(`[OAuth2] Token fetch failed for "${cred.name}":`, oauthErr.message);
+                    }
                 }
             }
 
