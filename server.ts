@@ -192,7 +192,7 @@ ${schemaSummary}`;
 // ==========================================
 app.post('/api/deploy', async (req, res) => {
     try {
-        const { endpoints, baseUrl, piiMasking, paginationConfig, credentials, rateLimitInfo } = req.body;
+        const { endpoints, baseUrl, piiMasking, paginationConfig, credentials, rateLimitInfo, endpointRateLimits } = req.body;
         const serverId = uuidv4();
         const config = {
             endpoints,
@@ -201,6 +201,7 @@ app.post('/api/deploy', async (req, res) => {
             paginationConfig: paginationConfig || {},
             credentials: credentials || [],
             rateLimitInfo: rateLimitInfo || null,
+            endpointRateLimits: endpointRateLimits || {},
             createdAt: new Date().toISOString(),
         };
         
@@ -336,9 +337,18 @@ app.get('/sse/:serverId', async (req, res) => {
                 }
             }
 
-            const rateInfo = vaultData.rateLimitInfo;
+            const globalRateInfo = vaultData.rateLimitInfo;
+            const epRateOverride = (vaultData.endpointRateLimits || {})[epKey];
+            const activeRpm = epRateOverride?.enabled
+                ? epRateOverride.requestsPerMinute
+                : globalRateInfo?.requestsPerMinute;
+            const rateSource = epRateOverride?.enabled ? 'endpoint override' : 'global';
+
             const makeRequest = async (extraParams: Record<string, any> = {}) => {
-                if (rateInfo?.requestsPerMinute) await throttleIfNeeded(serverId, rateInfo.requestsPerMinute);
+                if (activeRpm) {
+                    console.log(`[Throttle] ${ep.method} ${ep.path} — ${activeRpm} req/min (${rateSource})`);
+                    await throttleIfNeeded(serverId + epKey, activeRpm);
+                }
                 return axiosInstance({
                     method: ep.method,
                     url: `${vaultData.baseUrl}${ep.path}`,
