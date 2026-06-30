@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import { v4 as uuidv4 } from 'uuid';
 import axios from 'axios';
+import axiosRetry from 'axios-retry';
 import Stripe from 'stripe';
 import { initializeApp, cert, getApps } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
@@ -16,6 +17,27 @@ process.on('uncaughtException', (err) => {
 });
 process.on('unhandledRejection', (reason, promise) => {
     console.error('🔥 CRITICAL UNHANDLED REJECTION:', reason);
+});
+
+const axiosInstance = axios.create();
+axiosRetry(axiosInstance, {
+    retries: 3,
+    retryCondition: (error) => {
+        const status = error.response?.status;
+        return status === 429 || status === 503;
+    },
+    retryDelay: (retryCount, error) => {
+        const retryAfter = error.response?.headers['retry-after'];
+        if (retryAfter) {
+            const secs = parseInt(retryAfter, 10);
+            if (!isNaN(secs)) return secs * 1000;
+        }
+        return axiosRetry.exponentialDelay(retryCount);
+    },
+    onRetry: (retryCount, error, config) => {
+        const status = error.response?.status ?? error.code;
+        console.log(`[Backoff] Retry ${retryCount}/3 → ${config.method?.toUpperCase()} ${config.url} (${status})`);
+    },
 });
 
 const app = express();
@@ -217,7 +239,7 @@ async function getOAuthToken(serverId: string, cred: any): Promise<string> {
         if (cred.scopes) params.set('scope', cred.scopes);
     }
 
-    const resp = await axios.post(cred.tokenUrl, params.toString(), {
+    const resp = await axiosInstance.post(cred.tokenUrl, params.toString(), {
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     });
 
@@ -289,7 +311,7 @@ app.get('/sse/:serverId', async (req, res) => {
                 }
             }
 
-            const makeRequest = (extraParams: Record<string, any> = {}) => axios({
+            const makeRequest = (extraParams: Record<string, any> = {}) => axiosInstance({
                 method: ep.method,
                 url: `${vaultData.baseUrl}${ep.path}`,
                 headers: authHeaders,
