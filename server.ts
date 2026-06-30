@@ -170,9 +170,9 @@ ${schemaSummary}`;
 // ==========================================
 app.post('/api/deploy', async (req, res) => {
     try {
-        const { endpoints, baseUrl, piiMasking } = req.body;
+        const { endpoints, baseUrl, piiMasking, paginationConfig } = req.body;
         const serverId = uuidv4();
-        const config = { endpoints, baseUrl: baseUrl.trim(), piiMasking: !!piiMasking, createdAt: new Date().toISOString() };
+        const config = { endpoints, baseUrl: baseUrl.trim(), piiMasking: !!piiMasking, paginationConfig: paginationConfig || {}, createdAt: new Date().toISOString() };
         
         if (db) {
             await db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('deployments').doc(serverId).set(config);
@@ -219,8 +219,54 @@ app.get('/sse/:serverId', async (req, res) => {
             const toolName = req.params.name.toLowerCase();
             const ep = vaultData.endpoints.find((e: any) => `${e.method}_${e.path.replace(/[^a-zA-Z0-9]/g, '_')}`.toLowerCase() === toolName);
             if (!ep) throw new Error("Tool not found.");
-            
-            const resp = await axios({ method: ep.method, url: `${vaultData.baseUrl}${ep.path}` });
+
+            const args = req.params.arguments || {};
+            const queryParams: Record<string, any> = args.params || {};
+            const requestBody = args.body || {};
+            const epKey = `${ep.method}:${ep.path}`;
+            const pagCfg = (vaultData.paginationConfig || {})[epKey];
+
+            const makeRequest = (extraParams: Record<string, any> = {}) => axios({
+                method: ep.method,
+                url: `${vaultData.baseUrl}${ep.path}`,
+                params: ep.method === 'GET' ? { ...queryParams, ...extraParams } : undefined,
+                data: ep.method !== 'GET' ? requestBody : undefined,
+            });
+
+            const getNestedValue = (obj: any, path: string): any => {
+                if (!path) return obj;
+                return path.split('.').reduce((curr: any, key: string) => curr?.[key], obj);
+            };
+
+            if (pagCfg?.enabled) {
+                let allItems: any[] = [];
+                let cursor: string | null = null;
+                const MAX_ITEMS = pagCfg.maxItems || 500;
+
+                for (let i = 0; i < 20; i++) {
+                    const extraParams: Record<string, any> = {};
+                    if (cursor) extraParams[pagCfg.cursorParam] = cursor;
+
+                    const resp = await makeRequest(extraParams);
+                    const items = getNestedValue(resp.data, pagCfg.itemsPath);
+                    if (Array.isArray(items)) allItems = allItems.concat(items);
+
+                    cursor = getNestedValue(resp.data, pagCfg.cursorPath) ?? null;
+                    if (!cursor || allItems.length >= MAX_ITEMS) break;
+                }
+
+                const truncated = allItems.length > MAX_ITEMS;
+                const result: any = {
+                    items: allItems.slice(0, MAX_ITEMS),
+                    total_fetched: Math.min(allItems.length, MAX_ITEMS),
+                    truncated,
+                };
+                if (truncated) result.note = `Results truncated at ${MAX_ITEMS} items. Adjust the limit in MCP Studio if needed.`;
+
+                return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+            }
+
+            const resp = await makeRequest();
             return { content: [{ type: "text", text: JSON.stringify(resp.data, null, 2) }] };
         });
 
