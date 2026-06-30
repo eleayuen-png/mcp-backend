@@ -630,6 +630,21 @@ app.post('/api/stripe/webhook', express.raw({ type: '*/*' }), async (req: any, r
 });
 
 // ==========================================
+// 🧪 TEMPORARY: Rate Limit Testing Endpoint
+// ==========================================
+let retryTestCount = 0;
+app.get('/api/mock-429', (req, res) => {
+    retryTestCount++;
+    if (retryTestCount <= 2) {
+        console.log(`[Backoff] Retry ${retryTestCount}/3 → GET /api/mock-429 (429)`);
+        return res.status(429).set('Retry-After', '1').send('Too Many Requests');
+    }
+    console.log(`GET /api/mock-429 → 200 OK`);
+    retryTestCount = 0;
+    return res.status(200).json({ status: "Success", data: "You survived the rate limit!" });
+});
+
+// ==========================================
 // 🏁 9. START SERVER
 // ==========================================
 try {
