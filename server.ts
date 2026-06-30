@@ -192,7 +192,7 @@ ${schemaSummary}`;
 // ==========================================
 app.post('/api/deploy', async (req, res) => {
     try {
-        const { endpoints, baseUrl, piiMasking, paginationConfig, credentials } = req.body;
+        const { endpoints, baseUrl, piiMasking, paginationConfig, credentials, rateLimitInfo } = req.body;
         const serverId = uuidv4();
         const config = {
             endpoints,
@@ -200,6 +200,7 @@ app.post('/api/deploy', async (req, res) => {
             piiMasking: !!piiMasking,
             paginationConfig: paginationConfig || {},
             credentials: credentials || [],
+            rateLimitInfo: rateLimitInfo || null,
             createdAt: new Date().toISOString(),
         };
         
@@ -247,6 +248,16 @@ async function getOAuthToken(serverId: string, cred: any): Promise<string> {
     const expiresMs = ((resp.data.expires_in as number) || 3600) * 1000;
     serverCache.set(cred.id, { token, expiresAt: Date.now() + expiresMs });
     return token;
+}
+
+const requestThrottle = new Map<string, number>(); // serverId → last request timestamp
+
+async function throttleIfNeeded(serverId: string, reqPerMin: number): Promise<void> {
+    const minDelayMs = Math.ceil(60_000 / reqPerMin);
+    const last = requestThrottle.get(serverId) ?? 0;
+    const wait = minDelayMs - (Date.now() - last);
+    if (wait > 0) await new Promise(r => setTimeout(r, wait));
+    requestThrottle.set(serverId, Date.now());
 }
 
 function classifyAxiosError(err: any): string {
@@ -325,15 +336,19 @@ app.get('/sse/:serverId', async (req, res) => {
                 }
             }
 
-            const makeRequest = (extraParams: Record<string, any> = {}) => axiosInstance({
-                method: ep.method,
-                url: `${vaultData.baseUrl}${ep.path}`,
-                headers: authHeaders,
-                params: ep.method === 'GET'
-                    ? { ...authQueryParams, ...queryParams, ...extraParams }
-                    : Object.keys(authQueryParams).length ? authQueryParams : undefined,
-                data: ep.method !== 'GET' ? requestBody : undefined,
-            });
+            const rateInfo = vaultData.rateLimitInfo;
+            const makeRequest = async (extraParams: Record<string, any> = {}) => {
+                if (rateInfo?.requestsPerMinute) await throttleIfNeeded(serverId, rateInfo.requestsPerMinute);
+                return axiosInstance({
+                    method: ep.method,
+                    url: `${vaultData.baseUrl}${ep.path}`,
+                    headers: authHeaders,
+                    params: ep.method === 'GET'
+                        ? { ...authQueryParams, ...queryParams, ...extraParams }
+                        : Object.keys(authQueryParams).length ? authQueryParams : undefined,
+                    data: ep.method !== 'GET' ? requestBody : undefined,
+                });
+            };
 
             const getNestedValue = (obj: any, path: string): any => {
                 if (!path) return obj;
