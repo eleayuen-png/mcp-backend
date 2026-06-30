@@ -170,9 +170,16 @@ ${schemaSummary}`;
 // ==========================================
 app.post('/api/deploy', async (req, res) => {
     try {
-        const { endpoints, baseUrl, piiMasking, paginationConfig } = req.body;
+        const { endpoints, baseUrl, piiMasking, paginationConfig, credentials } = req.body;
         const serverId = uuidv4();
-        const config = { endpoints, baseUrl: baseUrl.trim(), piiMasking: !!piiMasking, paginationConfig: paginationConfig || {}, createdAt: new Date().toISOString() };
+        const config = {
+            endpoints,
+            baseUrl: baseUrl.trim(),
+            piiMasking: !!piiMasking,
+            paginationConfig: paginationConfig || {},
+            credentials: credentials || [],
+            createdAt: new Date().toISOString(),
+        };
         
         if (db) {
             await db.collection('artifacts').doc(APP_ID).collection('public').doc('data').collection('deployments').doc(serverId).set(config);
@@ -226,10 +233,29 @@ app.get('/sse/:serverId', async (req, res) => {
             const epKey = `${ep.method}:${ep.path}`;
             const pagCfg = (vaultData.paginationConfig || {})[epKey];
 
+            // Build auth headers and query params from stored credentials
+            const authHeaders: Record<string, string> = {};
+            const authQueryParams: Record<string, string> = {};
+            for (const cred of (vaultData.credentials || [])) {
+                if (!cred.key) continue;
+                if (cred.type === 'bearer') {
+                    authHeaders['Authorization'] = `Bearer ${cred.key}`;
+                } else if (cred.type === 'apiKey-header' || cred.type === 'api-key') {
+                    authHeaders[cred.headerName || 'X-API-Key'] = cred.key;
+                } else if (cred.type === 'apiKey-query') {
+                    authQueryParams[cred.queryParam || 'api_key'] = cred.key;
+                } else if (cred.type === 'basic') {
+                    authHeaders['Authorization'] = `Basic ${Buffer.from(cred.key).toString('base64')}`;
+                }
+            }
+
             const makeRequest = (extraParams: Record<string, any> = {}) => axios({
                 method: ep.method,
                 url: `${vaultData.baseUrl}${ep.path}`,
-                params: ep.method === 'GET' ? { ...queryParams, ...extraParams } : undefined,
+                headers: authHeaders,
+                params: ep.method === 'GET'
+                    ? { ...authQueryParams, ...queryParams, ...extraParams }
+                    : Object.keys(authQueryParams).length ? authQueryParams : undefined,
                 data: ep.method !== 'GET' ? requestBody : undefined,
             });
 
