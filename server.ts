@@ -630,23 +630,6 @@ app.post('/api/stripe/webhook', express.raw({ type: '*/*' }), async (req: any, r
 });
 
 // ==========================================
-// 🧪 TEMPORARY: Rate Limit Testing Endpoint
-// ==========================================
-app.get('/api/mock-429', (req, res) => {
-    console.log(`[Backoff] Retry 1/3 → GET https://api.shopify.com/v1/orders.json (429)`);
-
-    setTimeout(() => {
-        console.log(`[Backoff] Retry 2/3 → GET https://api.shopify.com/v1/orders.json (429)`);
-
-        setTimeout(() => {
-            console.log(`GET https://api.shopify.com/v1/orders.json → 200 OK`);
-            res.status(200).json({ status: "Success", data: "You survived the rate limit!" });
-        }, 1000);
-
-    }, 1000);
-});
-
-// ==========================================
 // 🏁 9. START SERVER
 // ==========================================
 try {
