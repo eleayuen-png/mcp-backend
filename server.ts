@@ -249,6 +249,19 @@ async function getOAuthToken(serverId: string, cred: any): Promise<string> {
     return token;
 }
 
+function classifyAxiosError(err: any): string {
+    const status = err.response?.status;
+    const url = err.config?.url ?? 'the API';
+    if (status === 429) return `Rate limit exhausted after retries. Do not retry immediately — ask the user to wait or check their API plan.`;
+    if (status === 401) return `Authentication failed (401 Unauthorized). The API key or token stored in MCP Studio is invalid or expired. Ask the user to update their credentials in MCP Studio.`;
+    if (status === 403) return `Access forbidden (403 Forbidden). The current credentials do not have permission for this endpoint. Ask the user to check their API plan or permissions.`;
+    if (status === 404) return `Resource not found (404): ${url}. The endpoint may have moved or the requested item does not exist.`;
+    if (status && status >= 500) return `The upstream API returned a server error (${status}). This is not a credentials or input problem — try again in a few minutes.`;
+    if (err.code === 'ECONNREFUSED' || err.code === 'ENOTFOUND') return `Could not reach the API at ${url}. Check that the base URL in MCP Studio is correct.`;
+    if (err.code === 'ECONNABORTED' || err.message?.includes('timeout')) return `The API request timed out. The upstream server may be overloaded — try again in a moment.`;
+    return `Unexpected error calling ${url}: ${err.message ?? 'Unknown error'}`;
+}
+
 app.get('/sse/:serverId', async (req, res) => {
     try {
         const serverId = req.params.serverId;
@@ -282,6 +295,7 @@ app.get('/sse/:serverId', async (req, res) => {
             const ep = vaultData.endpoints.find((e: any) => `${e.method}_${e.path.replace(/[^a-zA-Z0-9]/g, '_')}`.toLowerCase() === toolName);
             if (!ep) throw new Error("Tool not found.");
 
+            try {
             const args = req.params.arguments || {};
             const queryParams: Record<string, any> = args.params || {};
             const requestBody = args.body || {};
@@ -356,6 +370,11 @@ app.get('/sse/:serverId', async (req, res) => {
 
             const resp = await makeRequest();
             return { content: [{ type: "text", text: JSON.stringify(resp.data, null, 2) }] };
+            } catch (err: any) {
+                const msg = classifyAxiosError(err);
+                console.error('[Tool Error]', msg);
+                return { isError: true, content: [{ type: 'text', text: msg }] };
+            }
         });
 
         await mcpServer.connect(transport);
